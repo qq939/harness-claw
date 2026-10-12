@@ -113,7 +113,7 @@ def run():
         check("%s settings primaryModel" % p, sett.get("primaryModel") == model)
         check("%s settings base_url matches config" % p,
               (sett.get("env") or {}).get("ANTHROPIC_BASE_URL") == base_url)
-        # 关键：容器里的 claude CLI 只读 settings.json 的 env（config.json 是 hermit GUI 的配置，CLI 不读），
+        # 关键：容器里的 claude CLI 只读 settings.json 的 env（config.json 是 harness GUI 的配置，CLI 不读），
         # settings.json 缺模型键 → CLI 用内置默认模型名 → 端点报 model not found（localqwen 实测 404）。
         for k in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
                   "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"):

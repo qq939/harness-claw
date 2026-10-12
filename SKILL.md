@@ -70,7 +70,7 @@ curl -sS -X POST "http://localhost:19080/api/agents/19081-writer/command" \
 
 ## 6) 其他
 
-Hermit 平台这两个 API 的理解和实际用法，ssh是兜底用法，实际部署任务都可以通过send-message让claude帮你部署
+Harness 平台这两个 API 的理解和实际用法，ssh是兜底用法，实际部署任务都可以通过send-message让claude帮你部署
 
 ---
 
@@ -80,7 +80,7 @@ Hermit 平台这两个 API 的理解和实际用法，ssh是兜底用法，实�
 
 **本质**：一个浏览器端的 SSH 终端，通过 WebSocket 隧道连接到容器内部的 shell。
 
-**发现方式**：从 Hermit 控制台页面看到每个卡片有个"SSH终端"按钮，点击后加载一个 xterm.js 终端，连接的就是这个 WebSocket。
+**发现方式**：从 Harness 控制台页面看到每个卡片有个"SSH终端"按钮，点击后加载一个 xterm.js 终端，连接的就是这个 WebSocket。
 
 **实际用法**（我验证过的）：
 ```python
@@ -118,7 +118,7 @@ output = ws.recv()
 
 **本质**：把消息发给容器里运行的 Claude Agent（就是那个 `run_claude.js` 驱动的 AI 助手），Claude 会用 bash 工具执行命令。
 
-**发现方式**：从 Hermit 控制台页面的 JS 代码看到每个卡片有个输入框 + "发送"按钮，点击后调用这个 API。
+**发现方式**：从 Harness 控制台页面的 JS 代码看到每个卡片有个输入框 + "发送"按钮，点击后调用这个 API。
 
 **实际验证**：
 ```python

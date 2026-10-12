@@ -1,10 +1,10 @@
 # run-vllm-qwen38.ps1
-# 拉起本地 Qwen3.8-27B 推理服务，供 hermit 的 localqwen profile 使用。
+# 拉起本地 Qwen3.8-27B 推理服务，供 harness 的 localqwen profile 使用。
 #
 # 2026-09 架构更换：原为 vLLM（W4A16），现改为 llama.cpp GGUF，容器名 llama-qwen38。
 #   vLLM 版权重 18.21 GiB 塞不进 16GB 显存，必须 --cpu-offload-gb 8，实测仅 2-3 tok/s；
 #   GGUF 版 12.41 GiB 可全部进显存、无 offload，实测约 41 tok/s。
-#   端口与模型名两者一致（:8000 / qwen3.8-27b），所以 hermit 侧配置无需改动。
+#   端口与模型名两者一致（:8000 / qwen3.8-27b），所以 harness 侧配置无需改动。
 #
 # 真值源（模型与 compose 同目录）：
 #     C:\Users\qq939\Downloads\qwen38\docker-compose.yml

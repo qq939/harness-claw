@@ -1,4 +1,4 @@
-# Hermit Claw Control 检查手册
+# Harness Claw Control 检查手册
 
 ## 每次修改后必须执行的检查步骤
 

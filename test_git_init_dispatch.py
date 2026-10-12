@@ -11,7 +11,7 @@
      2) 指令内容包含：git init / 本地身份(user.email) / .gitignore / Initial commit /
         logs/commit.txt / skill 路径。
      3) 前端把「非Git项目」渲染成可点入口（__GIT_INIT__ + 单击/选择都触发）。
-     4) systemreadme 把 Git 列为硬要求；hermit-git skill 有 init + 每次提交 + 身份说明。
+     4) systemreadme 把 Git 列为硬要求；harness-git skill 有 init + 每次提交 + 身份说明。
   B) 线上（缺 docker/面板则 SKIP）
      5) 面板页面确实带上了新的点击入口文案。
      6) 对一张"非 git 仓库"的卡片 dry_run：返回的指令含关键要素，且不改动仓库。
@@ -67,7 +67,7 @@ def http_json(url, method="GET", payload=None, timeout=30):
 def run_static():
     app = read("control/app.py")
     sysreadme = read("config/rules/systemreadme.md")
-    git_skill = read("config/claude/skills/hermit-git/SKILL.md")
+    git_skill = read("config/claude/skills/harness-git/SKILL.md")
 
     # 只取 api_git_init 函数体（到下一个同级 def 为止），避免把相邻 helper 算进来
     git_init_body = ""
@@ -80,7 +80,7 @@ def run_static():
     check("git-init supports dry_run", "dry_run" in git_init_body)
     check("git-init has its own message template", "GIT_INIT_MESSAGE" in app and "build_git_init_message" in app)
 
-    for token in ("git init", "user.email", ".gitignore", "Initial commit", "logs/commit.txt", "hermit-git"):
+    for token in ("git init", "user.email", ".gitignore", "Initial commit", "logs/commit.txt", "harness-git"):
         check("instruction mentions %s" % token, token in app)
 
     # 前端：非Git项目 = 可点入口
@@ -92,7 +92,7 @@ def run_static():
     check("systemreadme lists git as a hard requirement",
           "git init" in sysreadme and "每次对话后必须提交" in sysreadme)
     check("systemreadme keeps hard-requirement section",
-          "硬要求" in sysreadme and "hermit-git" in sysreadme)
+          "硬要求" in sysreadme and "harness-git" in sysreadme)
     check("git skill covers init + identity + commit.txt",
           "git init" in git_skill and "user.email" in git_skill and "logs/commit.txt" in git_skill)
 

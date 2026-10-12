@@ -1,5 +1,5 @@
 #!/bin/sh
-# Hermit agent 容器看门狗：8082 上的 web app 不响应就重跑 start.sh。
+# Harness agent 容器看门狗：8082 上的 web app 不响应就重跑 start.sh。
 #
 # 背景（实测踩到）：容器启动时 CMD 只拉一次 start.sh，偶发失败就再没有第二次机会
 # ——19081-hub 卡片重启后 web 没起来，它的 logs/start.log 里一条记录都没有。

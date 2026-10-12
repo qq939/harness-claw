@@ -47,12 +47,12 @@ CHECK_FILES = [
     "tools/obs/server.py",
     "tools/email/app.py",
     "config/rules/systemreadme.md",
-    "config/claude/skills/hermit-ports/SKILL.md",
-    "config/claude/skills/hermit-tools-hub/SKILL.md",
-    "config/claude/skills/hermit-init/SKILL.md",
+    "config/claude/skills/harness-ports/SKILL.md",
+    "config/claude/skills/harness-tools-hub/SKILL.md",
+    "config/claude/skills/harness-init/SKILL.md",
     "SKILL.md",
     "TEST_CHECKLIST.md",
-    "test-hermit.mjs",
+    "test-harness.mjs",
 ]
 
 

@@ -7,7 +7,7 @@
 
 ```bash
 cd /home/agent/.claude/workspace/project
-git config user.name "hermit-agent"        # 容器里默认没有 git 身份，不设会 commit 失败
+git config user.name "harness-agent"        # 容器里默认没有 git 身份，不设会 commit 失败
 git config user.email "agent@hermit.local" # 用 --local（默认），不要 --global
 git init
 git add -A && git commit -m "Initial commit"

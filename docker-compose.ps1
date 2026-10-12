@@ -1,5 +1,5 @@
 # docker-compose.ps1
-# Hermit 部署脚本：端口已固定为 19xxx（19080 控制面板 / 19081 工具 Hub）。
+# Harness 部署脚本：端口已固定为 19xxx（19080 控制面板 / 19081 工具 Hub）。
 # 脚本不再做任何字符串替换或端口偏移，直接部署 docker-compose.yml 中已写好的 control-19080 服务。
 
 $ErrorActionPreference = "Stop"

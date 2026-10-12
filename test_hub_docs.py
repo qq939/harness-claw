@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""TDD 校验：systemreadme 与 hermit-tools-hub skill 对 Hub 公共接口的简略介绍。
+"""TDD 校验：systemreadme 与 harness-tools-hub skill 对 Hub 公共接口的简略介绍。
 
 覆盖点：
   1) systemreadme 简略介绍 Hub 首页、完整/简化注册格式、统一调用地址 19xxx。
-  2) hermit-tools-hub/SKILL.md 介绍所有重要公共接口与示例工具（obs）。
+  2) harness-tools-hub/SKILL.md 介绍所有重要公共接口与示例工具（obs）。
   3) 无旧域名 obs.dimond.top、无 18xxx 端口。
 
 超时机制：整个校验在守护线程中执行，主线程 join(timeout)，超时判失败。
@@ -33,7 +33,7 @@ def read(rel):
 
 def run():
     sysreadme = read("config/rules/systemreadme.md")
-    skill = read("config/claude/skills/hermit-tools-hub/SKILL.md")
+    skill = read("config/claude/skills/harness-tools-hub/SKILL.md")
 
     # 1) systemreadme 简略介绍
     check("systemreadme mentions tools knowledge base", "工具知识库" in sysreadme)

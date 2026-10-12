@@ -92,7 +92,7 @@ Hub 注册接口（容器内可达）：POST {hub_api}
 注册名 name 必须是 "{tool_name}"（面板据此显示「已注册」；同名重复注册会覆盖旧记录）
 
 步骤：
-1) 先读规范：/agent-config/skills/hermit-tools-hub/SKILL.md，以及
+1) 先读规范：/agent-config/skills/harness-tools-hub/SKILL.md，以及
    /home/agent/.claude/workspace/config-rules/systemreadme.md 的「核心三、注册到 Hub」。
 2) 摸清本项目**真实**对外提供的接口（不要照抄模板/示例）：
    - 功能性 API：HTTP 端点（方法 + 路径 + 用途）、WebSocket、上传/下载、静态页面等；
@@ -120,14 +120,14 @@ GIT_INIT_MESSAGE = """【初始化 Git 仓库】项目目录 /home/agent/.claude
 
 1) cd /home/agent/.claude/workspace/project
 2) 设置**本地**身份（不要 --global；容器里默认没有 git 身份，不设会 commit 失败）：
-   git config user.name "hermit-agent" && git config user.email "agent@hermit.local"
+   git config user.name "harness-agent" && git config user.email "agent@hermit.local"
 3) git init
 4) 确认 .gitignore 至少包含：logs/  node_modules/  .DS_Store  __pycache__/  *.log  .env  uploads/  dist/  build/
 5) git add -A && git commit -m "Initial commit"
 6) 在 logs/commit.txt 追加一行：<短commit_id> Initial commit
 7) 交付证据：贴出 `git log --oneline -1` 与 `git status --short` 的输出
 
-规范见 /agent-config/skills/hermit-git/SKILL.md。只做仓库初始化，不要改动项目功能代码。"""
+规范见 /agent-config/skills/harness-git/SKILL.md。只做仓库初始化，不要改动项目功能代码。"""
 
 
 def build_git_init_message(container_name):
@@ -318,7 +318,7 @@ def create_app(docker_client=None):
             if is_managed(c):
                 items.append(c)
                 continue
-            if is_compose_member(c) and c.name not in ("hermit-control-19080", "hermit-ssh-gateway", "openclaw-gateway") and c.name.startswith("hermit-agent-"):
+            if is_compose_member(c) and c.name not in ("hermit-control-19080", "hermit-ssh-gateway", "openclaw-gateway") and c.name.startswith("harness-agent-"):
                 items.append(c)
         return sorted(items, key=lambda c: c.name)
 
@@ -1166,7 +1166,7 @@ def create_app(docker_client=None):
                     with open(log_file, "a", encoding="utf-8") as f:
                         f.write(f"Image save error: {str(e)}\n")
 
-            # hermit 控制面板只做问答，-p 模式不需要权限参数，root 下正常运行
+            # harness 控制面板只做问答，-p 模式不需要权限参数，root 下正常运行
             result = subprocess.run(
                 ["claude", "-p", tmp_file, "--add-dir", "/config"],
                 capture_output=True, text=True, timeout=172800,  # 48小时
@@ -1461,8 +1461,8 @@ def create_app(docker_client=None):
             brief = brief[:97] + "..."
 
         track_uuid = str(uuid.uuid4())[:8]
-        subject = f"[Hermit] {name} #{track_uuid}"
-        body = f"容器: {name}\nUUID: {track_uuid}\n摘要: {brief}\n\n---\n此邮件由 Hermit SessionEnd 钩子自动发送。"
+        subject = f"[Harness] {name} #{track_uuid}"
+        body = f"容器: {name}\nUUID: {track_uuid}\n摘要: {brief}\n\n---\n此邮件由 Harness SessionEnd 钩子自动发送。"
 
         ok, msg = _send_email_via_service(subject, body)
 
@@ -1475,7 +1475,7 @@ def create_app(docker_client=None):
                 "container_name": name,
                 "sent_at": now,
                 "ttl": ttl,
-                "subject_prefix": f"[Hermit] {name} #{track_uuid}",
+                "subject_prefix": f"[Harness] {name} #{track_uuid}",
                 "reply_chain": [],
                 "last_checked": now,
             }
@@ -2287,7 +2287,7 @@ def create_app(docker_client=None):
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hermit Control 19080</title>
+    <title>Harness Control 19080</title>
     <style>
       :root {{
         --bg: #070A10;
@@ -2532,7 +2532,7 @@ def create_app(docker_client=None):
     <header>
       <div class="wrap">
         <div style="display:flex;align-items:center;gap:20px;margin-bottom:12px;">
-          <h1 id="hermitLogo" style="margin:0;cursor:pointer;user-select:none;" title="点击切换配置模板">HERMIT</h1>
+          <h1 id="harnessLogo" style="margin:0;cursor:pointer;user-select:none;" title="点击切换配置模板">HARNESS</h1>
           <span style="flex:1;"></span>
           <div style="display:flex;align-items:center;gap:8px;">
             <input id="claudeQuery" placeholder="问个问题..." style="padding:6px 12px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#fff;width:150px;" />
@@ -2592,7 +2592,7 @@ def create_app(docker_client=None):
           if (data.error) {{
             showModal("错误", data.error);
           }} else {{
-            showModal("HERMIT 回答", data.response);
+            showModal("HARNESS 回答", data.response);
           }}
         }} catch(e) {{
           showModal("请求失败", e.message);
@@ -2656,7 +2656,7 @@ def create_app(docker_client=None):
         const old = document.querySelector(".profile-popup");
         if (old) {{ old.remove(); return; }}
 
-        const h1 = document.getElementById("hermitLogo");
+        const h1 = document.getElementById("harnessLogo");
         const rect = h1.getBoundingClientRect();
         const popup = document.createElement("div");
         popup.className = "profile-popup";
@@ -2707,7 +2707,7 @@ def create_app(docker_client=None):
         setTimeout(() => document.addEventListener("click", close), 0);
       }}
 
-      document.getElementById("hermitLogo").onclick = (e) => {{
+      document.getElementById("harnessLogo").onclick = (e) => {{
         e.stopPropagation();
         showProfilePopup();
       }};

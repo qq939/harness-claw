@@ -19,8 +19,8 @@ await page.waitForTimeout(3000);
 const notice = await page.locator('#notice').textContent();
 console.log('结果:', notice);
 
-await page.screenshot({ path: '/tmp/hermit-result.png', fullPage: true });
-console.log('截图: /tmp/hermit-result.png');
+await page.screenshot({ path: '/tmp/harness-result.png', fullPage: true });
+console.log('截图: /tmp/harness-result.png');
 
 await browser.close();
 console.log('完成!');
