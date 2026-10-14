@@ -12,6 +12,8 @@
 import os
 import sys
 import threading
+from datetime import datetime, timedelta, timezone
+import subprocess
 
 TIMEOUT_SECONDS = 60
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +49,14 @@ def run():
     check("control no fixed FRPC_CONFIG_PATH", "FRPC_CONFIG_PATH" not in app)
     check("control add_frpc_rule uses cfg_path", "cfg_path = resolve_frpc_config_path()" in app)
 
+    # 3b) 19095 事故：section 已存在时**不能**连"重启 frpc"一起跳过
+    #     （"配置里写了" ≠ "frps 上生效"：端口复用留下的旧条目会让新卡片的映射永远建不起来）
+    body = app.split("def add_frpc_rule")[1].split("\n    def ")[0]
+    check("add_frpc_rule no early-return on existing section", "already configured, skipping" not in body)
+    check("add_frpc_rule always restarts frpc",
+          'containers.get("frpc")' in body and "container.restart()" in body)
+    check("add_frpc_rule rewrites stale section", "rewrote" in body and "new_content" in body)
+
     # 4) docker-compose 同时挂载两种目录
     #    注意：路径已从 ${PWD}/../frpc 改成相对路径 ../frpc —— compose 的相对路径按
     #    compose 文件所在目录解析，跟执行 compose 的 shell 的 ${PWD} 无关，更可靠。
@@ -54,6 +64,51 @@ def run():
     check("compose mounts ../frp", "../frp:/Users/jimjiang/Downloads/frp" in compose)
     active = [l for l in compose.splitlines() if not l.strip().startswith("#")]
     check("compose has no active ${PWD} dependency", all("${PWD}" not in l for l in active))
+
+    # 5) 线上不变量：frpc 载入的配置不能比 frpc.ini 旧
+    #    （否则就是"改了配置文件但没让 frpc 加载"——19095 公网被拒绝就是这个原因）
+    run_live_freshness()
+
+
+def _parse_iso(s):
+    s = (s or "").strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    if "." in s:
+        head, rest = s.split(".", 1)
+        for sep in ("+", "-"):
+            if sep in rest:
+                frac, tz = rest.split(sep, 1)
+                tz = sep + tz
+                break
+        else:
+            frac, tz = rest, ""
+        s = head + "." + frac[:6] + tz
+    return datetime.fromisoformat(s)
+
+
+def run_live_freshness():
+    """frpc.StartedAt 必须 >= frpc.ini 的 mtime（否则配置改了没加载）。"""
+    ini = None
+    for cand in (os.path.join(os.path.expanduser("~"), "Downloads", "frpc", "frpc.ini"),
+                 os.path.join(os.path.expanduser("~"), "Downloads", "frp", "frpc.ini")):
+        if os.path.isfile(cand):
+            ini = cand
+            break
+    if not ini:
+        print("[SKIP] frpc freshness (本机找不到 frpc.ini)", flush=True)
+        return
+    try:
+        p = subprocess.run(["docker", "inspect", "frpc", "--format", "{{.State.StartedAt}}"],
+                           capture_output=True, timeout=30)
+        started = _parse_iso((p.stdout or b"").decode("utf-8", "replace"))
+    except Exception as e:
+        print("[SKIP] frpc freshness (docker 不可用: %s)" % e, flush=True)
+        return
+    mtime = datetime.fromtimestamp(os.path.getmtime(ini), tz=timezone.utc)
+    # 给几秒余量：同一秒内的写入/重启不该误报
+    check("frpc loaded config no older than frpc.ini", started >= mtime - timedelta(seconds=5))
+    print("   -> frpc started %s / frpc.ini mtime %s" % (started.isoformat(), mtime.isoformat()), flush=True)
 
 
 if __name__ == "__main__":

@@ -349,28 +349,62 @@ def create_app(docker_client=None):
         return os.path.join(FRPC_PATH, "frpc.ini")
 
     def add_frpc_rule(port):
+        """确保 frpc.ini 里有 [mac<port>] 映射，并让 frpc **真正加载**它。
+
+        踩过的坑（19095 就是）：以前只要发现 `[mac<port>]` 已存在就 `return`，
+        —— 连重启 frpc 都一起跳过了。但"配置里写了" ≠ "frps 上生效"：那条规则可能是
+        上一次写入后 frpc 没重启，或者端口被复用留下的**旧条目**。结果卡片在宿主机端口上
+        听得挺好（Docker 端口代理在 LISTEN），公网却直接被拒绝：frps 上根本没有这个端口的监听。
+
+        现在：section 内容不一致就就地重写；**无论改没改都重启 frpc**（frpc.ini 里没有
+        admin/reload 配置，只能靠重启加载），并把重启前后的 StartedAt 打出来便于排查。
+        """
         section = f"mac{port}"
-        entry = (
-            f"\n[{section}]\n"
-            f"type = tcp\n"
-            f"local_ip = 0.0.0.0\n"
-            f"local_port = {port}\n"
-            f"remote_port = {port}\n"
-        )
+        entry_lines = [f"[{section}]", "type = tcp", "local_ip = 0.0.0.0",
+                       f"local_port = {port}", f"remote_port = {port}"]
         cfg_path = resolve_frpc_config_path()
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 content = f.read()
-            if f"[{section}]" in content:
-                print(f"[frpc] port {port} already configured, skipping", flush=True, file=sys.stderr)
-                return
-            with open(cfg_path, "a", encoding="utf-8") as f:
-                f.write(entry)
-            print(f"[frpc] added rule for port {port}, restarting frpc via docker-py...", flush=True, file=sys.stderr)
+            lines = content.splitlines()
+
+            start = end = None
+            for i, line in enumerate(lines):
+                if line.strip() == f"[{section}]":
+                    start = i
+                    end = len(lines)
+                    for j in range(i + 1, len(lines)):
+                        if lines[j].lstrip().startswith("["):
+                            end = j
+                            break
+                    break
+
+            if start is None:
+                new_content = content.rstrip("\n") + "\n\n" + "\n".join(entry_lines) + "\n"
+                action = "added"
+            else:
+                current = [l.strip() for l in lines[start:end] if l.strip()]
+                if current != entry_lines:
+                    new_content = "\n".join(lines[:start] + entry_lines + lines[end:]).rstrip("\n") + "\n"
+                    action = "rewrote"
+                else:
+                    new_content = content
+                    action = "unchanged"
+
+            if action != "unchanged":
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+            print(f"[frpc] rule for port {port}: {action}; restarting frpc so it takes effect...",
+                  flush=True, file=sys.stderr)
+
             try:
                 client = docker_client_or_default()
-                client.containers.get("frpc").restart()
-                print(f"[frpc] frpc restarted successfully", flush=True, file=sys.stderr)
+                container = client.containers.get("frpc")
+                before = ((getattr(container, "attrs", {}) or {}).get("State") or {}).get("StartedAt")
+                container.restart()
+                container.reload()
+                after = ((getattr(container, "attrs", {}) or {}).get("State") or {}).get("StartedAt")
+                print(f"[frpc] frpc restarted (StartedAt {before} -> {after})", flush=True, file=sys.stderr)
             except Exception as re:
                 print(f"[frpc] WARNING: docker restart frpc failed: {re}", flush=True, file=sys.stderr)
         except Exception as e:
