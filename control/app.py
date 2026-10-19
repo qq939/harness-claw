@@ -16,6 +16,7 @@ def _d(tag, msg):
         pass
 
 import json
+import logging
 import os
 import re
 import sys
@@ -35,6 +36,8 @@ from docker.types import LogConfig
 from flask import Flask, jsonify, make_response, request, send_file
 from flask_sock import Sock
 from tools.hub import registry as tools_hub
+
+log = logging.getLogger("harness.control")
 
 # 注册表共享路径：control 面板与 19081 Hub 卡片必须读写同一份 tools_registry.json。
 #   - control 容器：./config 挂到 /config → 用 /config/registry/tools_registry.json
@@ -76,6 +79,93 @@ HOST_WORKSPACES_ROOT_ENV = "HOST_WORKSPACES_ROOT"
 # HOST_TOOLS_ROOT_ENV: 宿主机 tools 目录环境变量名，用于把 tools 源码挂载到每个容器卡片工作目录下。
 # 使用位置：create_app（解析 app.config["HOST_TOOLS_ROOT"]，约 L154）；create_agent / recreate_agent（读取 host_tools_root 并挂载 volume）。
 HOST_TOOLS_ROOT_ENV = "HOST_TOOLS_ROOT"
+
+# ---------------------------------------------------------------------------
+# 今日花费：在卡片容器里扫今天的会话 jsonl，按 DeepSeek 官方分时价折算人民币。
+# 价格（元/百万 tokens，2026-10 官方页）：
+#   输入·缓存命中 0.02(谷)/0.04(峰)；输入·未命中 1(谷)/2(峰)；输出 4(谷)/8(峰)
+#   峰时 = 北京时间周一至周五 9:00-12:00、14:00-18:00，其余为谷时（半价）
+# 为什么不走 run_claude.js 记账：一次 --print 可能包含几十次工具调用（每轮一次 API），
+# 只有会话 jsonl 里才有完整的分轮 usage；而且这里只读不写，不碰发消息链路。
+# ---------------------------------------------------------------------------
+USAGE_REFRESH_SECONDS = 300
+USAGE_SCAN_JS = r"""
+const fs=require("fs"),path=require("path"),os=require("os");
+const roots=[path.join(os.homedir(),".claude","projects")];
+try{for(const h of fs.readdirSync("/home")){roots.push(path.join("/home",h,".claude","projects"));}}catch(e){}
+const todayBj=new Date(Date.now()+8*3600000).toISOString().slice(0,10);
+const dayStart=Date.parse(todayBj+"T00:00:00+08:00");
+const seen=new Set(),files=[];
+for(const r of roots){
+  if(!fs.existsSync(r))continue;
+  let ds=[];try{ds=fs.readdirSync(r);}catch(e){continue;}
+  for(const d of ds){
+    const dd=path.join(r,d);try{if(!fs.statSync(dd).isDirectory())continue;}catch(e){continue;}
+    let names=[];try{names=fs.readdirSync(dd);}catch(e){continue;}
+    for(const f of names){
+      if(!f.endsWith(".jsonl"))continue;
+      const p=path.join(dd,f);
+      if(seen.has(p))continue;
+      seen.add(p);
+      try{if(fs.statSync(p).mtimeMs<dayStart)continue;}catch(e){continue;}
+      files.push(p);
+    }
+  }
+}
+let turns=0,fresh=0,cached=0,out=0,cost=0;
+for(const p of files){
+  let lines=[];try{lines=fs.readFileSync(p,"utf8").split("\n");}catch(e){continue;}
+  for(const line of lines){
+    if(!line)continue;
+    let o;try{o=JSON.parse(line);}catch(e){continue;}
+    const u=(o.message&&o.message.usage)||o.usage;
+    if(!u||u.input_tokens==null)continue;
+    const t=Date.parse(o.timestamp||"");
+    if(!t||t<dayStart)continue;
+    const bj=new Date(t+8*3600000),h=bj.getUTCHours(),dw=bj.getUTCDay();
+    const peak=dw>=1&&dw<=5&&((h>=9&&h<12)||(h>=14&&h<18));
+    const fi=u.input_tokens||0,cr=u.cache_read_input_tokens||0,ou=u.output_tokens||0;
+    turns++;fresh+=fi;cached+=cr;out+=ou;
+    cost+=(fi*(peak?2:1)+cr*(peak?0.04:0.02)+ou*(peak?8:4))/1e6;
+  }
+}
+console.log(JSON.stringify({turns,fresh,cached,out,cost:cost,files:files.length,day:todayBj}));
+"""
+
+_USAGE_CACHE = {}
+_USAGE_LOCK = threading.Lock()
+
+
+def agent_type_of(container):
+    """卡片类型：先看 hermit.agent_type 标签，再退回 compose service。"""
+    labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
+    agent_type = labels.get("hermit.agent_type", "")
+    if not agent_type:
+        svc = labels.get("com.docker.compose.service") or ""
+        agent_type = f"compose/{svc}" if svc else "unknown"
+    return agent_type
+
+
+def scan_card_usage(container, agent_type):
+    """在卡片容器内扫今天的 usage，返回 {turns,fresh,cached,out,cost,...}；失败返回 None。"""
+    if agent_type not in ("claude", "ollama"):
+        return None
+    try:
+        res = container.exec_run(["node", "-e", USAGE_SCAN_JS], user=AGENT_RUNTIME_USER)
+    except Exception:
+        return None
+    if getattr(res, "exit_code", 1) != 0:
+        return None
+    raw = (getattr(res, "output", b"") or b"").decode("utf-8", errors="replace").strip().splitlines()
+    for line in reversed(raw):
+        try:
+            data = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(data, dict) and "cost" in data:
+            data["cost"] = round(float(data.get("cost") or 0), 2)
+            return data
+    return None
 
 # HUB_API_URL: 容器内访问 19081 Hub 注册接口的地址。
 # host.docker.internal 指向宿主机（19081 已发布到宿主机），比走公网域名更可靠。
@@ -928,14 +1018,9 @@ def create_app(docker_client=None):
 
     def format_item(container, tail):
         port = container_host_port(container)
-        labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
-        agent_type = labels.get("hermit.agent_type", "")
-        if not agent_type:
-            svc = labels.get("com.docker.compose.service") or ""
-            if svc:
-                agent_type = f"compose/{svc}"
-            else:
-                agent_type = "unknown"
+        agent_type = agent_type_of(container)
+        with _USAGE_LOCK:
+            usage = dict(_USAGE_CACHE.get(container.name) or {}) or None
         item = {
             "container_name": container.name,
             "agent_type": agent_type,
@@ -948,6 +1033,9 @@ def create_app(docker_client=None):
             "state": agent_states.get(container.name, "idle"),
             "registered": _tool_record_for_container(container.name) is not None,
             "ports": _read_port_config(container.name),
+            # 今日花费（人民币，按 DeepSeek 分时价估算）；后台线程每 5 分钟刷新，未刷新到为 None
+            "today_cost": (usage or {}).get("cost"),
+            "today_usage": usage,
         }
         return item
 
@@ -2430,6 +2518,7 @@ def create_app(docker_client=None):
         50% {{ opacity: 0.4; }}
       }}
       .meta {{ color: var(--muted); font-size: 11px; }}
+.cost-badge {{ display: inline-block; padding: 0 5px; border-radius: 8px; background: #e8f5e9; color: #2e7d32; font-size: 11px; cursor: help; }}
       .profile-popup {{
         position: fixed;
         z-index: 9999;
@@ -2771,7 +2860,7 @@ def create_app(docker_client=None):
                     </select>
                   </div>
                 </div>
-                <div class="meta">${{item.agent_type}} · ${{item.host_port}}:{SERVICE_PORT} · SSH:${{item.ssh_port}}</div>
+                <div class="meta">${{item.agent_type}} · ${{item.host_port}}:{SERVICE_PORT} · SSH:${{item.ssh_port}}${{!item.today_cost ? '' : ' · <span class="cost-badge" title="今日 API 花费（DeepSeek 分时价折算）：' + (item.today_usage.turns || 0) + ' 轮 · 未命中 ' + (item.today_usage.fresh || 0) + ' · 缓存 ' + (item.today_usage.cached || 0) + ' · 输出 ' + (item.today_usage.out || 0) + ' tokens">今日 ¥' + Number(item.today_cost).toFixed(2) + '</span>'}}</div>
               </div>
             </div>
             <div class="meta ${{stCls}}" data-status="${{item.status}}" data-port="${{item.host_port}}" style="display:flex;align-items:center;gap:6px;">
@@ -3577,6 +3666,26 @@ def create_app(docker_client=None):
     # 启动邮件回复监控后台线程
     monitor_thread = threading.Thread(target=_email_monitor_loop, daemon=True)
     monitor_thread.start()
+
+    # 今日花费刷新线程：每 5 分钟扫一遍各卡片今天的 usage（不占 /api/agents 请求路径）
+    def _usage_refresh_loop():
+        while True:
+            try:
+                for c in display_containers():
+                    if getattr(c, "status", "") != "running":
+                        continue
+                    data = scan_card_usage(c, agent_type_of(c))
+                    if data is None:
+                        continue
+                    data["updated_at"] = time.time()
+                    with _USAGE_LOCK:
+                        _USAGE_CACHE[c.name] = data
+            except Exception as e:
+                log.warning(f"[usage] refresh failed: {e}")
+            time.sleep(USAGE_REFRESH_SECONDS)
+
+    usage_thread = threading.Thread(target=_usage_refresh_loop, daemon=True)
+    usage_thread.start()
 
     return app
 

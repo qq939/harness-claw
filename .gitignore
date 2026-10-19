@@ -10,6 +10,7 @@ config/rules/*
 node_modules/
 uploads/
 __pycache__/
+tmp/
 *.pyc
 *.pyo
 .pytest_cache/
