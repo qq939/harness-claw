@@ -8,7 +8,7 @@
 ```bash
 cd /home/agent/.claude/workspace/project
 git config user.name "harness-agent"        # 容器里默认没有 git 身份，不设会 commit 失败
-git config user.email "agent@hermit.local" # 用 --local（默认），不要 --global
+git config user.email "agent@harness.local" # 用 --local（默认），不要 --global
 git init
 git add -A && git commit -m "Initial commit"
 ```
@@ -39,6 +39,23 @@ echo "$(git rev-parse --short HEAD) 描述本次变更" >> logs/commit.txt
   a1b2c3d4 添加用户认证功能
   e5f6g7h8 修复登录页面样式问题
   ```
+
+## 远程仓库命名（硬性）
+
+GitHub 仓库名**必须以 `harness` 开头**，例如 `harness-notes`、`harness-claw`。
+
+```bash
+# 自检（不合规会打印提示）
+git remote get-url origin | sed -E 's#.*/##; s#\.git$##' | grep -q '^harness' \
+  || echo "远程仓库名不合规：必须以 harness 开头"
+
+# 或者直接跑脚本（仓库里有 tools/github/scripts/check_repo_name.sh）
+bash tools/github/scripts/check_repo_name.sh
+
+# 已有仓库改名后，把本地远程指过去（GitHub 旧地址会自动重定向，但别依赖它）
+git remote set-url origin https://github.com/<owner>/<harness-新名>.git
+git remote -v
+```
 
 ## 常见踩坑
 
