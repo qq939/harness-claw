@@ -801,7 +801,7 @@ def create_app(docker_client=None):
         }
         log_config = LogConfig(type=LogConfig.types.JSON, config={"max-size": "500m", "max-file": "2"})
 
-        env_vars = {}
+        env_vars = {"TZ": "Asia/Shanghai"}  # 卡片内 date / 应用日志统一北京时间（镜像默认 UTC）
         if agent_type in ("claude", "ollama"):
             # 读取 claude 的 settings.json，把 env 字段注入到容器环境变量中
             # 注意：使用 CONFIG_ROOT (= /config) 因为这是容器内的挂载路径
@@ -967,7 +967,7 @@ def create_app(docker_client=None):
         except Exception:
             pass
 
-        env_vars = {}
+        env_vars = {"TZ": "Asia/Shanghai"}  # 卡片内 date / 应用日志统一北京时间（镜像默认 UTC）
         if agent_type in ("claude", "ollama"):
             # 读取 claude 的 settings.json，把 env 字段注入到容器环境变量中
             # 注意：使用 CONFIG_ROOT (= /config) 因为这是容器内的挂载路径

@@ -44,6 +44,7 @@ services:
       - PUBLIC_PREVIEW_BASE_URL=http://dimond.top
       - OPENCLAW_GATEWAY_HOST=172.30.0.10
       - OPENCLAW_GATEWAY_PORT=18790
+      - TZ=Asia/Shanghai
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

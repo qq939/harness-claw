@@ -15,7 +15,23 @@ if (!CLAUDE_MSG) {
 }
 
 let message = Buffer.from(CLAUDE_MSG, 'base64').toString('utf8');
-const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
+// 日志时间戳统一用北京时间（容器默认 UTC，toISOString() 会差 8 小时）。
+// 可用 HARNESS_TZ 覆盖；Intl 不依赖容器里的 tzdata，取不到就退回 UTC。
+const LOG_TZ = process.env.HARNESS_TZ || 'Asia/Shanghai';
+function localTimestamp() {
+    try {
+        return new Intl.DateTimeFormat('sv-SE', {
+            timeZone: LOG_TZ,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+            hour12: false,
+        }).format(new Date()).replace('T', ' ').slice(0, 19);
+    } catch (e) {
+        return new Date().toISOString().replace('T', ' ').substring(0, 19);
+    }
+}
+const timestamp = localTimestamp();
 
 const logEntry = `\n[${timestamp}] $ ${message}\n`;
 
