@@ -2776,17 +2776,17 @@ def create_app(docker_client=None):
       <div class="wrap">
         <div style="display:flex;align-items:center;gap:20px;margin-bottom:12px;">
           <h1 id="harnessLogo" style="margin:0;cursor:pointer;user-select:none;" title="点击切换配置模板">HARNESS</h1>
+          <div style="display:flex;align-items:center;gap:6px;" title="思考程度：保存到配置，重启卡片后生效">
+            <span style="font-size:12px;opacity:.85;">思考</span>
+            <select id="thinkingLevel" style="padding:6px 8px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#fff;">
+              <option value="high">高</option>
+              <option value="medium">中</option>
+              <option value="low">低</option>
+            </select>
+            <span id="thinkingHint" style="font-size:11px;opacity:.7;white-space:nowrap;"></span>
+          </div>
           <span style="flex:1;"></span>
           <div style="display:flex;align-items:center;gap:8px;">
-            <div style="display:flex;align-items:center;gap:6px;" title="思考程度：保存到配置，重启卡片后生效">
-              <span style="font-size:12px;opacity:.85;">思考</span>
-              <select id="thinkingLevel" style="padding:6px 8px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#fff;">
-                <option value="high">高</option>
-                <option value="medium">中</option>
-                <option value="low">低</option>
-              </select>
-              <span id="thinkingHint" style="font-size:11px;opacity:.7;white-space:nowrap;"></span>
-            </div>
             <input id="claudeQuery" placeholder="问个问题..." style="padding:6px 12px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#fff;width:150px;" />
             <button id="claudeAsk" style="padding:6px 12px;background:#3AE374;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:600;">询问</button>
           </div>
