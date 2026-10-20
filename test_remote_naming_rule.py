@@ -2,7 +2,7 @@
 """TDD 校验：GitHub 远程仓库命名规则（必须以 harness 开头）。
 
 背景：
-  项目从 hermit 改名 harness 后，GitHub 仓库还叫 hermit-claw，和规则不一致。
+  项目改名 harness 后，GitHub 仓库名还是旧的，和规则不一致。
   现在约定：任何远程仓库名（owner/repo 的 repo 部分）必须以 harness 开头，
   形如 harness-xxx；新建时照此命名，已有仓库改名后 git remote set-url。
 
