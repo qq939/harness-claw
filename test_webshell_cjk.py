@@ -57,14 +57,17 @@ def run_static():
     check("reader 用 decoder.feed", "decoder.feed(data)" in bp)
     check("GBK 回退", '"gbk"' in bp)
     check("中文字体回退", "Microsoft YaHei" in bp and "Noto Sans Mono CJK" in bp)
+    check("登录后设置 UTF-8 locale", "init_command" in bp and "chan.send(init_cmd" in bp)
     srv = open(os.path.join(WS, "webshell_server.py"), "r", encoding="utf-8").read()
     check("ws 别名入口也用 decoder", "_decoder.feed(data)" in srv)
 
 
-def ws_run(cmd, expect):
+def ws_run(cmd, expect, pre_wait=0.0):
     import websocket
     ws = websocket.create_connection(URL, timeout=15)
     try:
+        if pre_wait:
+            time.sleep(pre_wait)
         ws.send(json.dumps({"type": "input", "data": "clear\r"}))
         time.sleep(0.3)
         ws.send(json.dumps({"type": "input", "data": cmd + "\r"}))
@@ -96,14 +99,21 @@ def run_live():
         ok, data = ws_run("echo 中文测试", "中文测试")
         check("UTF-8 中文回显正确", ok)
         if not ok:
-            print("   -> %r" % data[:160], flush=True)
+            print("   -> %r" % data[:200], flush=True)
 
         ok2, data2 = ws_run(
             "python3 -c \"import sys;sys.stdout.buffer.write('中文GBK'.encode('gbk'))\"",
             "中文GBK")
         check("GBK 输出被转成 UTF-8", ok2)
         if not ok2:
-            print("   -> %r" % data2[:160], flush=True)
+            print("   -> %r" % data2[:200], flush=True)
+
+        ok3, data3 = ws_run("echo LC=$LC_ALL", "LC=C.UTF-8", pre_wait=1.2)
+        check("会话 locale 是 UTF-8", ok3)
+        if not ok3:
+            print("   -> %r" % data3[:200], flush=True)
+        if b"$'\\234'" in data3:
+            check("TTY 下不出现 $'\\234' 转义", False)
     except Exception as e:
         skip("线上终端中文", "连接失败: %s" % e)
 
