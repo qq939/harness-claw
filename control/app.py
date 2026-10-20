@@ -277,19 +277,26 @@ GIT_INIT_MESSAGE = """【初始化 Git 仓库】项目目录 /home/agent/.claude
 
 1) cd /home/agent/.claude/workspace/project
 2) 设置**本地**身份（不要 --global；容器里默认没有 git 身份，不设会 commit 失败）：
-   git config user.name "harness-agent" && git config user.email "agent@hermit.local"
+   git config user.name "harness-agent" && git config user.email "agent@harness.local"
 3) git init
 4) 确认 .gitignore 至少包含：logs/  node_modules/  .DS_Store  __pycache__/  *.log  .env  uploads/  dist/  build/
 5) git add -A && git commit -m "Initial commit"
 6) 在 logs/commit.txt 追加一行：<短commit_id> Initial commit
 7) 交付证据：贴出 `git log --oneline -1` 与 `git status --short` 的输出
 
-规范见 /agent-config/skills/harness-git/SKILL.md。只做仓库初始化，不要改动项目功能代码。"""
+【绑定 GitHub 远程（需要时才做）】仓库名必须以 harness 开头，例如 harness-{suggested}。
+   - 新建：gh repo create harness-{suggested} --private --source . --remote origin --push
+   - 已有仓库但名字不合规：先在 GitHub 改名，再 git remote set-url origin <新地址>
+   - 自检：git remote get-url origin | sed -E 's#.*/##; s#\\.git$##' | grep -q '^harness' || echo "远程仓库名不合规"
+
+规范见 /agent-config/skills/harness-git/SKILL.md。只做仓库初始化与远程绑定，不要改动项目功能代码。"""
 
 
 def build_git_init_message(container_name):
-    """渲染「git init」指令。"""
-    return GIT_INIT_MESSAGE
+    """渲染「git init」指令；建议的仓库名按卡片名推导（去掉端口前缀）。"""
+    suggested = re.sub(r"^\d{5}-", "", container_name or "").strip() or "project"
+    suggested = re.sub(r"[^A-Za-z0-9._-]+", "-", suggested).strip("-") or "project"
+    return GIT_INIT_MESSAGE.format(suggested=suggested)
 
 
 # AGENT_UID / AGENT_GID: 容器内 agent 用户的 uid/gid（见 agents/claude/Dockerfile 的 useradd -u 501 -g 20）。
@@ -2165,6 +2172,15 @@ def create_app(docker_client=None):
             lines = output.split("\n")
             current_commit = lines[0].strip()
             log_lines = lines[1:]
+
+            # 远程仓库合规检查：卡片绑定 GitHub 远程时，仓库名必须以 harness 开头
+            remote_cmd = (f'cd {project_path} && git -c safe.directory=* remote get-url origin 2>/dev/null || true')
+            remote_res = container.exec_run(["/bin/sh", "-lc", remote_cmd], user=AGENT_RUNTIME_USER)
+            remote_url = (remote_res.output or b"").decode("utf-8", errors="replace").strip()
+            remote_repo = remote_url.rstrip("/").split("/")[-1] if remote_url else ""
+            if remote_repo.endswith(".git"):
+                remote_repo = remote_repo[:-4]
+            remote_compliant = (remote_repo.startswith("harness") if remote_repo else None)
             
             commits = [{
                 "hash": "__FORK__",
@@ -2184,7 +2200,8 @@ def create_app(docker_client=None):
                             "message": f"[{date_str}] {message}", 
                             "is_current": is_current
                         })
-            return jsonify({"commits": commits})
+            return jsonify({"commits": commits, "remote_url": remote_url,
+                            "remote_repo": remote_repo, "remote_compliant": remote_compliant})
         except PermissionError as e:
             return jsonify({"error": str(e)}), 403
         except docker.errors.NotFound:
@@ -2639,6 +2656,7 @@ def create_app(docker_client=None):
       }}
       .meta {{ color: var(--muted); font-size: 11px; }}
 .cost-badge {{ display: inline-block; padding: 0 5px; border-radius: 8px; background: #e8f5e9; color: #2e7d32; font-size: 11px; cursor: help; }}
+.git-remote-warn {{ color: #c62828; font-size: 11px; cursor: help; white-space: nowrap; }}
       .profile-popup {{
         position: fixed;
         z-index: 9999;
@@ -3326,6 +3344,8 @@ def create_app(docker_client=None):
               // 不是 git 仓库：这一项本身就是可点的操作入口（点它 = 下达 git init 指令）
               gitSelect.innerHTML = '<option value="__GIT_INIT__">非Git项目 · 点击执行 git init</option>';
               gitSelect.dataset.gitInit = '1';
+              const staleWarn = div.querySelector(".git-remote-warn");
+              if (staleWarn) staleWarn.remove();
               return;
             }}
             delete gitSelect.dataset.gitInit;
@@ -3336,6 +3356,19 @@ def create_app(docker_client=None):
               opt.textContent = (c.is_current ? "✓ " : "") + c.message;
               gitSelect.appendChild(opt);
             }});
+            // 远程仓库命名检查：卡片绑定 GitHub 远程时必须以 harness 开头
+            let remoteWarn = div.querySelector(".git-remote-warn");
+            if (d.remote_compliant === false) {{
+              if (!remoteWarn) {{
+                remoteWarn = document.createElement("span");
+                remoteWarn.className = "git-remote-warn";
+                gitSelect.insertAdjacentElement("afterend", remoteWarn);
+              }}
+              remoteWarn.textContent = "远程不合规";
+              remoteWarn.title = "远程仓库 " + d.remote_repo + " 必须以 harness 开头；改名后执行 git remote set-url origin <新地址>";
+            }} else if (remoteWarn) {{
+              remoteWarn.remove();
+            }}
           }} catch(e) {{
             console.error("Failed to load git commits:", e);
           }}

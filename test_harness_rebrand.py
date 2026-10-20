@@ -30,7 +30,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SELF_NAME = os.path.basename(os.path.abspath(__file__))
 
 # 运行产物 / 依赖 / VCS，不参与扫描
-SKIP_DIRS = {".git", "logs", "workspaces", "node_modules", "__pycache__", ".venv", "venv"}
+SKIP_DIRS = {".git", "logs", "workspaces", "node_modules", "__pycache__", ".venv", "venv", "tmp"}
 
 # 必须原样保留的基础设施标识（会打断运行中服务或指向不存在的资源）
 PROTECTED = [

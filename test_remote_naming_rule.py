@@ -75,6 +75,13 @@ def run_static():
 
     check("检查脚本存在", os.path.isfile(os.path.join(ROOT, "tools", "github", "scripts", "check_repo_name.sh")))
 
+    # 卡片这一端：git init 指令要教会卡片绑定时用 harness-* 仓库名
+    app_src = read(os.path.join("control", "app.py"))
+    check("git init 指令含远程命名规则", "仓库名必须以 harness 开头" in app_src and "gh repo create harness-" in app_src)
+    check("git init 指令会推导建议名", "def build_git_init_message(container_name)" in app_src and "{suggested}" in app_src)
+    check("git-commits 返回 remote_compliant", '"remote_compliant": remote_compliant' in app_src)
+    check("前端有远程不合规提示", "git-remote-warn" in app_src)
+
 
 def bash_exe():
     """Windows 上 bash 常被 WSL 抢走（路径会被转成 C:Users...），优先 Git Bash。"""
@@ -107,6 +114,32 @@ def run_live():
                        cwd=tmp, check=False)
         p2 = subprocess.run([bash, posix(script)], cwd=tmp, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         check("check_repo_name.sh 对不合规仓库返回 1", p2.returncode == 1)
+
+    # 线上：卡片的 git-commits 必须带远程合规字段；没有 git 仓库的卡自动跳过
+    import json
+    import urllib.error
+    import urllib.request
+    control = os.environ.get("CONTROL_URL", "http://localhost:19080")
+    candidates = [os.environ.get("GIT_CHECK_CARD")] if os.environ.get("GIT_CHECK_CARD") else \
+        ["19091-picturetext", "19082-ocs", "19096-astock-hf", "19085-git"]
+    for card in candidates:
+        try:
+            with urllib.request.urlopen("%s/api/agents/%s/git-commits" % (control, card), timeout=20) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except Exception:
+            continue
+        if "remote_compliant" not in data:
+            continue
+        check("git-commits 带 remote_compliant (%s)" % card, True)
+        repo, ok = data.get("remote_repo") or "", data.get("remote_compliant")
+        if repo:
+            check("线上远程合规标记与名字一致 (%s)" % repo, ok == repo.startswith("harness"))
+            if not ok:
+                print("   -> 提示：%s 的远程 %s 不符合 harness 前缀（面板会显示「远程不合规」）" % (card, repo), flush=True)
+        else:
+            print("[SKIP] %s 未绑定 GitHub 远程" % card, flush=True)
+        return
+    print("[SKIP] 没有找到已初始化 git 的卡片", flush=True)
 
 
 def run():
