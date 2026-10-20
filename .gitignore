@@ -32,3 +32,6 @@ openai.env
 temp_*
 tmp_*
 test_tts*
+# 平台 SSH 公钥（公开信息，随仓库走，换机器/新建卡片不用再配置一遍）
+!config/ssh/
+!config/ssh/authorized_keys

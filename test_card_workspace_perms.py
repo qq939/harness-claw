@@ -111,6 +111,12 @@ def run_live():
         skip("live workspace checks", "没有卡片")
         return
 
+    # created/exited 的卡没有可检查的运行时目录/文件，跳过（不代表创建逻辑有问题）
+    names = [i.get("container_name") for i in items if i.get("status") == "running"]
+    if not names:
+        skip("live workspace checks", "没有运行中的卡片")
+        return
+
     bad_mode = [n for n in names if dir_mode(n) != "777"]
     check("every existing card dir is 777", not bad_mode)
     for n in bad_mode[:5]:

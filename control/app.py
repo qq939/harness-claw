@@ -574,7 +574,63 @@ def create_app(docker_client=None):
         except Exception as e:
             print(f"[frpc] ERROR: {e}", flush=True, file=sys.stderr)
 
+    def _platform_public_keys():
+        """平台公钥：config/ssh/authorized_keys，一行一个；# 开头的行忽略。"""
+        path = os.path.join(app.config["CONFIG_ROOT"], "ssh", "authorized_keys")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+        except OSError:
+            return []
+
+    def ensure_authorized_keys(container_name):
+        """把平台公钥合并进卡片 ~/.ssh/authorized_keys（700 目录 / 600 文件，属主 agent）。
+
+        sshd 是 StrictModes yes：权限或属主不对会直接忽略这个文件（不报错，只是登不上）。
+        只追加不覆盖，卡片自己加的 key 保留；同一个 key 按前两段（类型+内容）去重。
+        """
+        keys = _platform_public_keys()
+        if not keys:
+            return 0
+        try:
+            container = docker_client_or_default().containers.get(container_name)
+        except Exception:
+            return 0
+        try:
+            cur = container.exec_run(["sh", "-lc", "cat ~/.ssh/authorized_keys 2>/dev/null"],
+                                     user=AGENT_RUNTIME_USER)
+            lines = [l.strip() for l in (cur.output or b"").decode("utf-8", "replace").splitlines() if l.strip()]
+            seen = set()
+            for line in lines:
+                parts = line.split()
+                if len(parts) >= 2:
+                    seen.add(" ".join(parts[:2]))
+            added = 0
+            for key in keys:
+                ident = " ".join(key.split()[:2])
+                if ident in seen:
+                    continue
+                lines.append(key)
+                seen.add(ident)
+                added += 1
+            if not added:
+                return 0
+            payload = base64.b64encode(("\n".join(lines) + "\n").encode("utf-8")).decode("ascii")
+            cmd = ("mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+                   f"echo '{payload}' | base64 -d > ~/.ssh/authorized_keys && "
+                   "chmod 600 ~/.ssh/authorized_keys")
+            container.exec_run(["sh", "-lc", cmd], user=AGENT_RUNTIME_USER)
+            return added
+        except Exception as e:
+            log.warning(f"[ssh] ensure_authorized_keys({container_name}) failed: {e}")
+            return 0
+
     def scp_rules_to_container(container_name, project_path):
+        # 顺手把平台公钥写进卡片（新建/重建都会走到这里）
+        try:
+            ensure_authorized_keys(container_name)
+        except Exception:
+            pass
         rules_dir = "/config/rules"
         _d("scp", f"container={container_name} project={project_path} rules_dir={rules_dir}")
         if not os.path.exists(rules_dir):

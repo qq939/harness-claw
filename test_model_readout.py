@@ -340,6 +340,12 @@ def run_live():
         skip("live /current-model per card", "no cards")
         return
 
+    # 只验运行中的卡片：created/exited 的卡读不到容器内文件，不代表模型读取有 bug
+    items = [i for i in items if i.get("status") == "running"]
+    if not items:
+        skip("live /current-model per card", "no running cards")
+        return
+
     old_shape = []
     for item in items:
         name = item.get("container_name")
