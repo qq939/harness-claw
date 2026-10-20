@@ -77,8 +77,12 @@ def skip(name, reason):
 
 # ---------------------------------------------------------------- 源码抽取
 def extract_func(src, name):
-    """把 create_app 里 4 空格缩进的嵌套 def 整段抽出来（含其上的注释不算）。"""
-    m = re.search(r"^(\s*)def %s\(" % re.escape(name), src, re.M)
+    """把 create_app 里 4 空格缩进的嵌套 def 整段抽出来（含其上的注释不算）。
+
+    注意用 [ \t]* 而不是 \s*：\s 会跨行（空行时 ^ 匹配到空行开头，\s* 把换行也吃掉），
+    会把 4 空格缩进算成 5，导致边界判断失配、一路吞到后面的函数里。
+    """
+    m = re.search(r"^([ \t]*)def %s\(" % re.escape(name), src, re.M)
     if not m:
         raise AssertionError("function not found: %s" % name)
     indent = m.group(1)

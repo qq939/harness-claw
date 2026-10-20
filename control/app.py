@@ -167,6 +167,73 @@ def scan_card_usage(container, agent_type):
             return data
     return None
 
+
+# ---------------------------------------------------------------------------
+# 思考程度（effort level）：面板右上角 高/中/低 三档
+#   CLI 只认 CLAUDE_CODE_EFFORT_LEVEL（单数，值 low|medium|high）；
+#   以前 settings.json 里写的 CLAUDE_CODE_EFFORT_LEVELS（复数）是无效键。
+# 生效路径：容器每次启动都会把 /agent-config（= 宿主机 config/claude/）复制到
+#   ~/.claude/，所以「写宿主机 settings.json* → 重启卡片」即可换档。
+# 关键：不能把它注入容器进程 env —— 进程 env 优先于 settings.json，
+#   一旦在创建时冻住，重启就永远改不了。create/recreate 处会主动 pop 掉。
+# ---------------------------------------------------------------------------
+THINKING_LEVEL_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
+THINKING_LEVELS = ("high", "medium", "low")
+THINKING_LEVEL_LABELS = {"high": "高", "medium": "中", "low": "低"}
+
+
+def _settings_json_paths(config_root="/config"):
+    """settings.json 及其 profile 变体（settings.json.deepseek 等），默认配置排最前。"""
+    d = os.path.join(config_root, "claude")
+    try:
+        names = [n for n in os.listdir(d) if n == "settings.json" or n.startswith("settings.json.")]
+    except OSError:
+        return []
+    names.sort(key=lambda n: (n != "settings.json", n))
+    return [os.path.join(d, n) for n in names]
+
+
+def read_thinking_level(config_root="/config"):
+    """当前档位；没配过就当 high（与历史行为一致）。"""
+    for path in _settings_json_paths(config_root):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                env = (json.load(f) or {}).get("env") or {}
+        except Exception:
+            continue
+        level = str(env.get(THINKING_LEVEL_ENV) or "").strip().lower()
+        if level in THINKING_LEVELS:
+            return level
+    return "high"
+
+
+def write_thinking_level(config_root, level):
+    """把档位写进所有 settings.json*，返回改动文件数。非法的 level 抛 ValueError。"""
+    if level not in THINKING_LEVELS:
+        raise ValueError("level must be one of high/medium/low")
+    written = 0
+    for path in _settings_json_paths(config_root):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        env = data.get("env")
+        if not isinstance(env, dict):
+            env = {}
+            data["env"] = env
+        env.pop("CLAUDE_CODE_EFFORT_LEVELS", None)  # 旧的无效键，顺手清掉
+        env[THINKING_LEVEL_ENV] = level
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+            f.write("\n")
+        os.replace(tmp, path)
+        written += 1
+    return written
+
 # HUB_API_URL: 容器内访问 19081 Hub 注册接口的地址。
 # host.docker.internal 指向宿主机（19081 已发布到宿主机），比走公网域名更可靠。
 HUB_API_URL = "http://host.docker.internal:19081/api/tools"
@@ -759,6 +826,10 @@ def create_app(docker_client=None):
                                 break
                 except Exception:
                     pass
+            # 思考档位只走 settings.json：容器启动时从 /agent-config 复制，
+            # 注入进程 env 会把档位冻住（env 优先于 settings），重启也换不了档。
+            env_vars.pop(THINKING_LEVEL_ENV, None)
+            env_vars.pop("CLAUDE_CODE_EFFORT_LEVELS", None)
         elif agent_type == "openclaw@2026.2.9":
             # 读取 openclaw.json，提取 auth token 注入到环境变量中
             config_root = app.config["CONFIG_ROOT"]
@@ -921,6 +992,10 @@ def create_app(docker_client=None):
                                 break
                 except Exception:
                     pass
+
+        # 同上：思考档位不注入进程 env，交给容器启动时从 /agent-config 复制的 settings.json
+        env_vars.pop(THINKING_LEVEL_ENV, None)
+        env_vars.pop("CLAUDE_CODE_EFFORT_LEVELS", None)
 
         new_container = docker_client_or_default().containers.run(
             spec["image"],
@@ -1765,6 +1840,51 @@ def create_app(docker_client=None):
                     break
         named = [p for p in candidates if not p["is_default"]]
         return (named or candidates)[0]
+
+    # ------------------------------------------------------------------
+    # 思考程度（全局）：高 / 中 / 低
+    #   PUT 只写宿主机 config/claude/settings.json*，不重启任何容器。
+    #   容器下次启动会从 /agent-config 复制，所以「重启卡片」后才生效。
+    # ------------------------------------------------------------------
+    @app.get("/api/thinking-level")
+    def api_thinking_level():
+        config_root = app.config["CONFIG_ROOT"]
+        level = read_thinking_level(config_root)
+        try:
+            changed_at = os.path.getmtime(os.path.join(config_root, "claude", "settings.json"))
+        except OSError:
+            changed_at = 0
+        pending = []
+        for c in display_containers():
+            if agent_type_of(c) not in ("claude", "ollama"):
+                continue
+            started = ((getattr(c, "attrs", {}) or {}).get("State") or {}).get("StartedAt") or ""
+            try:
+                started_ts = datetime.fromisoformat(started.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                started_ts = 0
+            if started_ts and changed_at and started_ts < changed_at:
+                pending.append(c.name)
+        return jsonify({
+            "level": level,
+            "levels": list(THINKING_LEVELS),
+            "labels": THINKING_LEVEL_LABELS,
+            "pending": pending,
+            "note": "已保存到配置；重启卡片后生效",
+        })
+
+    @app.put("/api/thinking-level")
+    def api_set_thinking_level():
+        data = request.get_json(silent=True) or {}
+        level = str(data.get("level") or "").strip().lower()
+        if level not in THINKING_LEVELS:
+            return jsonify({"error": "level must be one of high/medium/low"}), 400
+        try:
+            files = write_thinking_level(app.config["CONFIG_ROOT"], level)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        return jsonify({"ok": True, "level": level, "files": files,
+                        "note": "已保存，重启卡片后生效"})
 
     @app.get("/api/agents/<path:name>/current-model")
     def api_current_model(name):
@@ -2658,6 +2778,15 @@ def create_app(docker_client=None):
           <h1 id="harnessLogo" style="margin:0;cursor:pointer;user-select:none;" title="点击切换配置模板">HARNESS</h1>
           <span style="flex:1;"></span>
           <div style="display:flex;align-items:center;gap:8px;">
+            <div style="display:flex;align-items:center;gap:6px;" title="思考程度：保存到配置，重启卡片后生效">
+              <span style="font-size:12px;opacity:.85;">思考</span>
+              <select id="thinkingLevel" style="padding:6px 8px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#fff;">
+                <option value="high">高</option>
+                <option value="medium">中</option>
+                <option value="low">低</option>
+              </select>
+              <span id="thinkingHint" style="font-size:11px;opacity:.7;white-space:nowrap;"></span>
+            </div>
             <input id="claudeQuery" placeholder="问个问题..." style="padding:6px 12px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:4px;color:#fff;width:150px;" />
             <button id="claudeAsk" style="padding:6px 12px;background:#3AE374;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:600;">询问</button>
           </div>
@@ -3502,8 +3631,47 @@ def create_app(docker_client=None):
         await refreshCards();
       }};
 
+      // 思考程度：高 / 中 / 低（写配置，不重启；卡片重启后生效）
+      const thinkingSel = document.getElementById("thinkingLevel");
+      const thinkingHint = document.getElementById("thinkingHint");
+      async function loadThinkingLevel() {{
+        try {{
+          const res = await fetch("/api/thinking-level", {{ cache: "no-store" }});
+          const d = await res.json();
+          thinkingSel.value = d.level || "high";
+          const pending = d.pending || [];
+          if (pending.length) {{
+            thinkingHint.textContent = pending.length + " 张卡待重启";
+            thinkingHint.title = "重启这些卡片后换档：" + pending.join("、");
+          }} else {{
+            thinkingHint.textContent = "已生效";
+            thinkingHint.title = "所有运行中的卡片都已使用该档位";
+          }}
+        }} catch (err) {{
+          thinkingHint.textContent = "读取失败";
+        }}
+      }}
+      thinkingSel.addEventListener("change", async () => {{
+        thinkingHint.textContent = "保存中...";
+        try {{
+          const res = await fetch("/api/thinking-level", {{
+            method: "PUT",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ level: thinkingSel.value }})
+          }});
+          const d = await res.json();
+          if (!res.ok) throw new Error(d.error || "保存失败");
+          thinkingHint.textContent = "已保存，重启卡片后生效";
+          thinkingHint.title = d.note || "";
+        }} catch (err) {{
+          thinkingHint.textContent = "保存失败";
+        }}
+        loadThinkingLevel();
+      }});
+
       (async () => {{
         await loadTypes();
+        await loadThinkingLevel();
         try {{
           const res = await fetch("/api/config/profiles", {{ cache: "no-store" }});
           profileData = await res.json();
