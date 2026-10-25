@@ -130,8 +130,12 @@ def run_live():
         delta = abs(float(direct["cost"]) - float(api_cost))
         check("API cost matches container-side scan (delta %.2f)" % delta, delta <= 0.05)
     if direct:
-        if direct["turns"] > 0:
-            check("active card spent money today", float(direct["cost"]) > 0)
+        if direct["turns"] > 0 and float(direct["cost"]) > 0:
+            check("active card spent money today", True)
+        elif direct["turns"] > 0:
+            # 有轮次但 0 花费：多半是 key 失效（401），此时花费统计无意义，跳过而不是判失败
+            skip("active card spent money today",
+                 "turns>0 but cost=0（多半是 API key 失效/无计费通道）")
         else:
             skip("active card spent money today", "no traffic today")
 

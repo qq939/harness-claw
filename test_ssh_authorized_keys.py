@@ -58,14 +58,22 @@ def docker(*args, timeout=30):
 
 
 def platform_keys():
+    if not os.path.isfile(KEY_FILE):
+        return []
     with open(KEY_FILE, "r", encoding="utf-8") as f:
         return [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
 
 
 def run_static():
-    check("平台公钥文件存在", os.path.isfile(KEY_FILE))
-    keys = platform_keys() if os.path.isfile(KEY_FILE) else []
-    check("公钥行格式合法", bool(keys) and all(re.match(r"^(ssh-ed25519|ssh-rsa|ecdsa-)", k) for k in keys))
+    # 2026-10-25 起：平台不再分发公钥文件（config/ssh/authorized_keys 已删除）——
+    # 公钥随公开仓库分发等于把入口也公开。公钥要进卡片由运维自己放（或用面板下发）。
+    if os.path.isfile(KEY_FILE):
+        keys = platform_keys()
+        check("平台公钥文件存在（可选）", bool(keys) and all(
+            re.match(r"^(ssh-ed25519|ssh-rsa|ecdsa-)", k) for k in keys))
+    else:
+        check("平台不再分发公钥文件（符合新策略）", True)
+        print("[INFO] config/ssh/authorized_keys 不存在：卡片不再被自动写入公钥", flush=True)
 
     app = open(os.path.join(ROOT, "control", "app.py"), "r", encoding="utf-8").read()
     check("control 有 ensure_authorized_keys", "def ensure_authorized_keys(" in app)
