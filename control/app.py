@@ -743,7 +743,7 @@ def create_app(docker_client=None):
         _d("create", f"RETURN: {result}")
         return result
 
-    def recreate_agent(container_name):
+    def recreate_agent(container_name, profile=""):
         container = docker_client_or_default().containers.get(container_name)
         labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
         agent_type = labels.get("hermit.agent_type") or ""
@@ -788,8 +788,12 @@ def create_app(docker_client=None):
         if agent_type in ("claude", "ollama"):
             # 读取 claude 的 settings.json，把 env 字段注入到容器环境变量中
             # 注意：使用 CONFIG_ROOT (= /config) 因为这是容器内的挂载路径
+            # profile 非空时读变体文件（settings.json.<profile> / config.json.<profile>），
+            # 让「切换模型」重建出来的容器，进程 env 就是所选 profile 的端点与 token
+            # （容器 env 在创建时固定，restart 不会更新，必须重建才能换）。
             config_root = app.config["CONFIG_ROOT"]
-            settings_path = os.path.join(config_root, spec["config_subdir"], "settings.json")
+            suffix = ("." + profile) if profile else ""
+            settings_path = os.path.join(config_root, spec["config_subdir"], "settings.json" + suffix)
             if os.path.exists(settings_path):
                 try:
                     import json
@@ -801,7 +805,7 @@ def create_app(docker_client=None):
                 except Exception:
                     pass
             # 也读取 config.json，提取 ANTHROPIC_AUTH_TOKEN（新版 Claude Code 使用）
-            config_path = os.path.join(config_root, spec["config_subdir"], "config.json")
+            config_path = os.path.join(config_root, spec["config_subdir"], "config.json" + suffix)
             if os.path.exists(config_path):
                 try:
                     import json
@@ -1505,7 +1509,17 @@ def create_app(docker_client=None):
 
     @app.post("/api/agents/<path:name>/switch-model")
     def api_switch_model(name):
-        """切换容器模型：写入选定模板的 settings.json 和 config.json，保留 hooks，重启容器"""
+        """切换容器模型：重建容器并写入选定 profile 的 settings.json / config.json。
+
+        为什么要重建而不是 restart：
+          - 容器进程 env 在 create 时固定，restart 不会更新；而 Claude Code CLI
+            的 token（ANTHROPIC_AUTH_TOKEN）实际取自容器进程 env，只改文件不换 env
+            会导致「用 A 端点的 key 打 B 端点」→ 401。
+          - 镜像 CMD 启动时还会用 /agent-config（宿主 config/claude 只读挂载）里的
+            默认 config.json / settings.json 覆盖容器内同名文件，把刚写的 profile 冲回默认值。
+        所以这里用 recreate_agent(profile=...) 重建：进程 env 按 profile 变体注入，
+        再把 profile 的文件写进容器，两边一致。
+        """
         data = request.get_json(silent=True) or {}
         profile = (data.get("profile") or "").strip()
         if not profile:
@@ -1533,6 +1547,17 @@ def create_app(docker_client=None):
         # 替换 hooks 中的 $HOSTNAME 为实际容器名
         settings_content = settings_content.replace("$HOSTNAME", name)
 
+        # 重建容器：进程 env 按 profile 变体注入（端点 + token + 模型）
+        try:
+            recreate_agent(name, profile=profile)
+        except Exception as e:
+            return jsonify({"error": f"Failed to recreate container: {e}"}), 500
+
+        try:
+            container = docker_client_or_default().containers.get(name)
+        except Exception as e:
+            return jsonify({"ok": True, "profile": profile, "warning": f"Recreated but container not found: {e}"})
+
         # 写入容器
         def _write_via_exec(dst_path, content):
             encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
@@ -1541,18 +1566,35 @@ def create_app(docker_client=None):
                 user=AGENT_RUNTIME_USER)
             return ec.exit_code == 0
 
-        if not _write_via_exec("/home/agent/.claude/settings.json", settings_content):
-            return jsonify({"error": "Failed to write settings.json"}), 500
-        if not _write_via_exec("/home/agent/.claude/config.json", config_content):
-            return jsonify({"error": "Failed to write config.json"}), 500
+        def _write_profile_files():
+            if not _write_via_exec("/home/agent/.claude/settings.json", settings_content):
+                return "Failed to write settings.json"
+            if not _write_via_exec("/home/agent/.claude/config.json", config_content):
+                return "Failed to write config.json"
+            return None
 
-        # 重启容器使配置生效
+        # 等容器起来再写：镜像 CMD 启动时会用 /agent-config 里的默认文件覆盖容器内同名文件，
+        # 所以必须在启动完成后再写一次，确保容器内落地的是选定 profile。
+        import time
+        for _ in range(60):
+            try:
+                container.reload()
+                if container.status == "running":
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        time.sleep(2)
+
         try:
-            container.restart()
+            err = _write_profile_files()
         except Exception as e:
-            return jsonify({"ok": True, "profile": profile, "warning": f"Files written but restart failed: {e}"})
+            err = str(e)
+        if err:
+            return jsonify({"ok": True, "profile": profile, "recreated": True,
+                            "warning": f"Recreated but rewriting profile files failed: {err}"})
 
-        return jsonify({"ok": True, "profile": profile, "restarted": True})
+        return jsonify({"ok": True, "profile": profile, "recreated": True})
 
     # ------------------------------------------------------------------
     # 模型读取（纯只读，不修改任何容器）
@@ -1698,18 +1740,30 @@ def create_app(docker_client=None):
         matched = _match_profile(profiles, base_url, provider_name, model_id)
 
         # 建容器时把 settings.json 的 env 注入进了容器进程环境（control/app.py 创建容器处），
-        # 之后改文件/重启都不会更新它。实测（在容器里把进程 env 指向死端点，Claude 调用即失败）
-        # 表明：**进程 env 优先于 settings.json**，所以 env 才是"实际生效"的端点。
+        # 之后改文件/重启都不会更新它。
+        # 实测（在容器里把容器进程 env 的 token 指向无效值、settings.json 指向有效端点）：
+        # Claude 调用报 "Invalid API key"；把进程 env 的 token 去掉后同理失效，
+        # 说明 **token（ANTHROPIC_AUTH_TOKEN）取自容器进程 env**，
+        # 而端点/模型取自容器内 settings.json —— 两者必须一致，否则就是 401。
+        # 所以"实际生效"以进程 env 为准，切模型必须重建容器（见 api_switch_model）。
         env_base_url = ""
+        env_model_id = ""
         try:
             for entry in (((container.attrs or {}).get("Config") or {}).get("Env") or []):
                 if entry.startswith("ANTHROPIC_BASE_URL="):
                     env_base_url = entry.split("=", 1)[1]
-                    break
+                elif entry.startswith("ANTHROPIC_MODEL=") and not env_model_id:
+                    env_model_id = entry.split("=", 1)[1]
+                elif entry.startswith("ANTHROPIC_DEFAULT_SONNET_MODEL=") and not env_model_id:
+                    env_model_id = entry.split("=", 1)[1]
         except Exception:
             env_base_url = ""
 
-        env_match = _match_profile(profiles, env_base_url, "", "") if env_base_url else None
+        # 用容器进程 env 的模型 id 一起消歧：同一端点下可能有多个 profile
+        # （如 deepseek / deepseek-flash），只给端点会挑错档位。
+        env_match = _match_profile(profiles, env_base_url, "", env_model_id) if env_base_url else None
+        # 实际生效 = 容器进程 env（实测：Claude Code CLI 的 token 取自容器进程 env；
+        # 容器内文件只决定端点/模型，token 与 key 不匹配就会 401）
         in_sync = (not env_base_url) or (_normalize_url(env_base_url) == _normalize_url(base_url))
 
         effective = {

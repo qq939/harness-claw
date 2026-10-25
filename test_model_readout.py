@@ -17,11 +17,10 @@
 
 覆盖点：
   A) 纯逻辑（从 control/app.py 抽出嵌套 helper 直接跑，无需 flask/docker）
-     1) _host_model_profiles() 能扫出"默认 + 5 个 profile"且模型 id 正确。
-     2) _match_profile() 用 base_url + provider 名消歧：
+     1) _host_model_profiles() 能扫出"默认 + 本分支实际存在的 profile"且模型 id 正确。
+     2) _match_profile() 用 base_url + provider 名 / 模型 id 消歧：
         - 同域名的 deepseek / deepseek-flash 必须区分开
-        - 同域名的 minimax / minimax-m2.7-highspeed 必须区分开
-        - localqwen（host.docker.internal）能匹配
+        - minimax（api.minimaxi.com）能匹配
         - 未知端点返回 None
   B) 静态：control/app.py 里不得再出现旧的域名猜测（model_map）。
   C) 线上：抓每张卡片的 /current-model，模型信息必须非空且不含 unknown。
@@ -45,14 +44,14 @@ CLAUDE_DIR = os.path.join(ROOT, "config", "claude")
 CONTROL = os.environ.get("CONTROL_URL", "http://localhost:18080")
 
 # profile -> (ANTHROPIC_MODEL, base_url)
+# 本分支实际存在的 profile（config/claude/ 下的 settings.json.<p> + config.json.<p>）：
+#   deepseek       -> deepseek-v4-flash @ api.deepseek.com
+#   deepseek-flash -> deepseek-flash    @ api.deepseek.com（V4.1-Flash）
+#   minimax        -> MiniMax-M3.1-Flash @ api.minimaxi.com（国内版官方端点）
 EXPECT_PROFILES = {
-    "minimax": ("MiniMax-M3", "https://api.minimax.cn/anthropic"),
-    "minimax-m2.7-highspeed": ("MiniMax-M2.7-highspeed", "https://api.minimax.cn/anthropic"),
+    "minimax": ("MiniMax-M3.1-Flash", "https://api.minimaxi.com/anthropic"),
     "deepseek": ("deepseek-v4-flash", "https://api.deepseek.com/anthropic"),
     "deepseek-flash": ("deepseek-flash", "https://api.deepseek.com/anthropic"),
-    "localqwen": ("qwen3.8-27b", "http://host.docker.internal:8000"),
-    # webqwen：远端（dimond.top:21234）的 web 版千问，模型名带 publisher 前缀
-    "webqwen": ("qwen/qwen3.8-27b", "http://dimond.top:21234"),
 }
 
 failures = []
@@ -113,12 +112,14 @@ class FakeResult(object):
 class FakeContainer(object):
     """按路径返回 settings.json / config.json 内容，并可伪造烤进容器的进程 env。"""
 
-    def __init__(self, settings_text, config_text, env_base_url=""):
+    def __init__(self, settings_text, config_text, env_base_url="", env_model=""):
         self._settings = settings_text.encode("utf-8")
         self._config = config_text.encode("utf-8")
         env = ["PATH=/usr/bin"]
         if env_base_url:
             env.append("ANTHROPIC_BASE_URL=" + env_base_url)
+        if env_model:
+            env.append("ANTHROPIC_MODEL=" + env_model)
         self.attrs = {"Config": {"Env": env}}
 
     def exec_run(self, cmd, user=None):
@@ -144,42 +145,44 @@ def card_fixtures():
                                        "ANTHROPIC_BASE_URL": base_url}},
             "websiteUrl": base_url}}, "current": "pid"}}, indent=2)
 
+    # 每张卡片：容器名 -> (settings 文本, config 文本, 进程 env 端点, 进程 env 模型, 期望)
     return {
-        # 文件与进程 env 一致：头部就用文件里的精确模型
-        "legacy-in-sync": (
-            settings("https://api.minimaxi.com/anthropic"),
-            config("MiniMax", "MiniMax-M3", "https://api.minimaxi.com/anthropic"),
-            "https://api.minimaxi.com/anthropic",
-            {"in_sync": True, "model_id": "MiniMax-M3", "provider_name": "MiniMax",
-             "profile": "", "configured_model_id": "MiniMax-M3"}),
-        "localqwen-in-sync": (
-            settings("http://host.docker.internal:8000", primary="qwen3.8-27b"),
-            config("LocalQwen3.8-27B (vLLM)", "qwen3.8-27b", "http://host.docker.internal:8000"),
-            "http://host.docker.internal:8000",
-            {"in_sync": True, "model_id": "qwen3.8-27b", "provider_name": "LocalQwen3.8-27B (vLLM)",
-             "profile": "localqwen", "configured_model_id": "qwen3.8-27b"}),
-        # 真实线上状态：文件已是 localqwen，但进程 env 还是建容器时的旧端点（env 优先）
-        "localqwen-stale-env": (
-            settings("http://host.docker.internal:8000", primary="qwen3.8-27b"),
-            config("LocalQwen3.8-27B (vLLM)", "qwen3.8-27b", "http://host.docker.internal:8000"),
-            "https://api.minimaxi.com/anthropic",
-            {"in_sync": False, "model_id": "", "provider_name": "",
-             "profile": "", "configured_model_id": "qwen3.8-27b",
-             "effective_base_url": "https://api.minimaxi.com/anthropic"}),
-        # 同域名两兄弟：只有 provider 名能区分
+        # 文件与进程 env 一致：能精确匹配到 minimax profile
+        "minimax-in-sync": (
+            settings("https://api.minimaxi.com/anthropic", primary="MiniMax-M3.1-Flash"),
+            config("MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash", "https://api.minimaxi.com/anthropic"),
+            "https://api.minimaxi.com/anthropic", "MiniMax-M3.1-Flash",
+            {"in_sync": True, "model_id": "MiniMax-M3.1-Flash",
+             "provider_name": "MiniMax-M3.1-Flash", "profile": "minimax",
+             "configured_model_id": "MiniMax-M3.1-Flash"}),
+        # 同端点两兄弟：只有 provider 名 / 模型 id 能区分
         "deepseek-flash-in-sync": (
             settings("https://api.deepseek.com/anthropic"),
             config("DeepSeek-V4.1-Flash", "deepseek-flash", "https://api.deepseek.com/anthropic"),
-            "https://api.deepseek.com/anthropic",
+            "https://api.deepseek.com/anthropic", "deepseek-flash",
             {"in_sync": True, "model_id": "deepseek-flash", "provider_name": "DeepSeek-V4.1-Flash",
              "profile": "deepseek-flash", "configured_model_id": "deepseek-flash"}),
-        "minimax-m27-in-sync": (
+        "deepseek-in-sync": (
+            settings("https://api.deepseek.com/anthropic"),
+            config("DeepSeek-V4-Flash", "deepseek-v4-flash", "https://api.deepseek.com/anthropic"),
+            "https://api.deepseek.com/anthropic", "deepseek-v4-flash",
+            {"in_sync": True, "model_id": "deepseek-v4-flash", "provider_name": "DeepSeek-V4-Flash",
+             "profile": "deepseek", "configured_model_id": "deepseek-v4-flash"}),
+        # 旧卡片：端点已不在任何 profile 中（历史配置）
+        "legacy-in-sync": (
             settings("https://api.minimax.cn/anthropic"),
-            config("MiniMax-M2.7-highspeed", "MiniMax-M2.7-highspeed", "https://api.minimax.cn/anthropic"),
-            "https://api.minimax.cn/anthropic",
-            {"in_sync": True, "model_id": "MiniMax-M2.7-highspeed",
-             "provider_name": "MiniMax-M2.7-highspeed", "profile": "minimax-m2.7-highspeed",
-             "configured_model_id": "MiniMax-M2.7-highspeed"}),
+            config("MiniMax", "MiniMax-M3", "https://api.minimax.cn/anthropic"),
+            "https://api.minimax.cn/anthropic", "MiniMax-M3",
+            {"in_sync": True, "model_id": "MiniMax-M3", "provider_name": "MiniMax",
+             "profile": "", "configured_model_id": "MiniMax-M3"}),
+        # 真实线上状态：文件已切到 minimax，但进程 env 还是建容器时的旧端点（env 优先）
+        "stale-env": (
+            settings("https://api.minimaxi.com/anthropic", primary="MiniMax-M3.1-Flash"),
+            config("MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash", "https://api.minimaxi.com/anthropic"),
+            "https://api.deepseek.com/anthropic", "deepseek-flash",
+            {"in_sync": False, "model_id": "deepseek-flash", "provider_name": "DeepSeek-V4.1-Flash",
+             "profile": "deepseek-flash", "configured_model_id": "MiniMax-M3.1-Flash",
+             "effective_base_url": "https://api.deepseek.com/anthropic"}),
     }
 
 
@@ -194,8 +197,8 @@ def run_endpoint_dry_run():
 
     ns["_require_managed"] = require_managed
 
-    for name, (settings_text, config_text, env_base_url, expect) in card_fixtures().items():
-        containers[name] = FakeContainer(settings_text, config_text, env_base_url)
+    for name, (settings_text, config_text, env_base_url, env_model, expect) in card_fixtures().items():
+        containers[name] = FakeContainer(settings_text, config_text, env_base_url, env_model)
         try:
             data = endpoint(name)
         except Exception as e:
@@ -223,11 +226,13 @@ def run_endpoint_dry_run():
                  (data.get("configured") or {}).get("model_id"), data.get("in_sync")), flush=True)
 
     # 关键语义：env 优先 —— 头部必须报"实际生效"的端点，而不是文件里那个
-    stale = endpoint("localqwen-stale-env")
+    stale = endpoint("stale-env")
     check("stale env: headline is the effective (env) endpoint",
-          stale.get("base_url") == "https://api.minimaxi.com/anthropic")
+          stale.get("base_url") == "https://api.deepseek.com/anthropic")
+    check("stale env: headline model is the env model",
+          stale.get("model_id") == "deepseek-flash")
     check("stale env: configured keeps the file model",
-          (stale.get("configured") or {}).get("model_id") == "qwen3.8-27b")
+          (stale.get("configured") or {}).get("model_id") == "MiniMax-M3.1-Flash")
     check("stale env: warning explains 实际生效 vs 文件",
           any("实际生效" in w for w in stale.get("warnings") or []))
 
@@ -239,10 +244,10 @@ def run_endpoint_dry_run():
           any("不在现有 profile 中" in w for w in legacy.get("warnings") or []))
     check("in-sync card has no stale-env warning",
           not any("不一致：实际生效" in w for w in legacy.get("warnings") or []))
-    clean = endpoint("localqwen-in-sync")
-    # 不要求"完全无告警"：当前默认 profile 可能不是 localqwen（会给出"落后于当前默认配置"的提示），
+    clean = endpoint("minimax-in-sync")
+    # 不要求"完全无告警"：当前默认 profile 可能不是 minimax（会给出"落后于当前默认配置"的提示），
     # 这里只要求没有"env 与文件不一致"那类真正的问题告警。
-    check("in-sync localqwen card has no stale-env warning",
+    check("in-sync minimax card has no stale-env warning",
           not any("实际生效" in w for w in clean.get("warnings") or []))
 
     # settings.json 与 config.json 端点打架时必须报出来
@@ -288,28 +293,23 @@ def run_logic():
         check("profiles: %s base_url=%s" % (p, base_url), entry["base_url"] == base_url)
         check("profiles: %s has provider_name" % p, bool(entry["provider_name"]))
 
-    # 同域名必须靠 provider 名消歧 —— 旧实现做不到的两组
+    # 同域名必须靠 provider 名消歧 —— 旧实现做不到的一组
     for profile, provider in (("deepseek", "DeepSeek-V4-Flash"),
                               ("deepseek-flash", "DeepSeek-V4.1-Flash")):
         hit = match(profiles, "https://api.deepseek.com/anthropic", provider, "")
         got = (hit or {}).get("profile")
         check("disambiguate deepseek pair -> %s (provider=%s)" % (profile, provider), got == profile)
 
-    for profile, provider in (("minimax", "MiniMax-M3"),
-                              ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed")):
-        hit = match(profiles, "https://api.minimax.cn/anthropic", provider, "")
-        got = (hit or {}).get("profile")
-        check("disambiguate minimax pair -> %s (provider=%s)" % (profile, provider), got == profile)
-
-    hit = match(profiles, "http://host.docker.internal:8000", "LocalQwen3.8-27B (vLLM)", "qwen3.8-27b")
-    check("match localqwen by base_url", (hit or {}).get("profile") == "localqwen")
+    # minimax 只有一个档位（模型已统一为 MiniMax-M3.1-Flash），端点命中即可
+    hit = match(profiles, "https://api.minimaxi.com/anthropic", "MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash")
+    check("match minimax by base_url", (hit or {}).get("profile") == "minimax")
 
     # 末尾斜杠差异不应影响匹配
-    hit = match(profiles, "http://host.docker.internal:8000/", "LocalQwen3.8-27B (vLLM)", "")
-    check("match tolerates trailing slash", (hit or {}).get("profile") == "localqwen")
+    hit = match(profiles, "https://api.minimaxi.com/anthropic/", "MiniMax-M3.1-Flash", "")
+    check("match tolerates trailing slash", (hit or {}).get("profile") == "minimax")
 
     # 不在任何 profile 里的端点 → None（面板应显示"无匹配"，而不是猜一个名字）
-    for url in ("https://api.anthropic.com", "https://api.minimaxi.com/anthropic", ""):
+    for url in ("https://api.anthropic.com", "https://api.minimax.cn/anthropic", ""):
         hit = match(profiles, url, "Whatever", "whatever")
         check("no bogus match for %r" % (url or "<empty>"), hit is None)
 
@@ -339,6 +339,7 @@ def run_live():
     old_shape = []
     for item in items:
         name = item.get("container_name")
+        agent_type = item.get("agent_type") or ""
         try:
             url = "%s/api/agents/%s/current-model" % (CONTROL, urllib.parse.quote(name))
             with urllib.request.urlopen(url, timeout=30) as resp:
@@ -357,6 +358,16 @@ def run_live():
         effective = data.get("effective") or {}
         configured = data.get("configured") or {}
         in_sync = data.get("in_sync")
+
+        # openclaw 卡片不读 ~/.claude 下的配置（模型写在 ~/.openclaw/openclaw.json），
+        # 这里只要求接口可用、不崩，且明确给出告警。
+        if not agent_type.startswith("claude") and not agent_type.startswith("ollama"):
+            check("live %s non-claude card -> endpoint answers with warnings" % name,
+                  bool(data.get("warnings")))
+            print("   -> %s: agent_type=%s (非 claude 卡片，跳过模型断言)"
+                  % (name, agent_type), flush=True)
+            continue
+
         check("live %s base_url non-empty" % name, bool(base_url))
         check("live %s model_id is not 'unknown'" % name, model_id.lower() != "unknown")
         check("live %s reports effective layer" % name, bool(effective.get("base_url")))
