@@ -1,0 +1,107 @@
+{
+  "version": 2,
+  "permissions": {
+    "autoPlanThreshold": 999,
+    "paths": [
+      {
+        "path": "/**",
+        "mode": [
+          "read",
+          "write"
+        ]
+      }
+    ]
+  },
+  "claude": {
+    "providers": {
+      "7ba4c425-6f82-4246-a7f4-24750d50fdb7": {
+        "id": "7ba4c425-6f82-4246-a7f4-24750d50fdb7",
+        "name": "MiniMax-M3",
+        "settingsConfig": {
+          "env": {
+            "ANTHROPIC_AUTH_TOKEN": "sk-REPLACE_WITH_YOUR_OWN_KEY_0000000000000000000000000000",
+            "ANTHROPIC_BASE_URL": "https://api.minimax.cn/anthropic",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "MiniMax-M3",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "MiniMax-M3",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M3",
+            "ANTHROPIC_MODEL": "MiniMax-M3",
+            "API_TIMEOUT_MS": "3000000",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
+          }
+        },
+        "websiteUrl": "https://platform.minimaxi.com",
+        "category": "cn_official",
+        "createdAt": 1775843188712,
+        "meta": {
+          "custom_endpoints": {
+            "https://api.minimax.cn/anthropic": {
+              "url": "https://api.minimax.cn/anthropic",
+              "addedAt": 1775843188709
+            }
+          }
+        }
+      }
+    },
+    "current": "7ba4c425-6f82-4246-a7f4-24750d50fdb7"
+  },
+  "omo": {
+    "providers": {},
+    "current": ""
+  },
+  "codex": {
+    "providers": {},
+    "current": ""
+  },
+  "gemini": {
+    "providers": {},
+    "current": ""
+  },
+  "opencode": {
+    "providers": {},
+    "current": ""
+  },
+  "mcp": {
+    "servers": {}
+  },
+  "prompts": {
+    "claude": {
+      "prompts": {}
+    },
+    "codex": {
+      "prompts": {}
+    },
+    "gemini": {
+      "prompts": {}
+    },
+    "opencode": {
+      "prompts": {}
+    }
+  },
+  "skills": {
+    "skills": {},
+    "repos": [
+      {
+        "owner": "ComposioHQ",
+        "name": "awesome-claude-skills",
+        "branch": "master",
+        "enabled": true,
+        "skillsPath": null
+      },
+      {
+        "owner": "anthropics",
+        "name": "skills",
+        "branch": "main",
+        "enabled": true,
+        "skillsPath": null
+      },
+      {
+        "owner": "cexll",
+        "name": "myclaude",
+        "branch": "master",
+        "enabled": true,
+        "skillsPath": "skills"
+      }
+    ]
+  },
+  "common_config_snippets": {}
+}

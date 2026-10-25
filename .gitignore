@@ -1,16 +1,9 @@
 .trae/
 .venv/
 venv/
-!config/rules/systemreadme.md
-!config/rules/run_claude.js
-!config/claude/config.json.*
-!config/claude/settings.json.*
-config/*
-config/rules/*
 node_modules/
 uploads/
 __pycache__/
-tmp/
 *.pyc
 *.pyo
 .pytest_cache/
@@ -32,6 +25,22 @@ openai.env
 temp_*
 tmp_*
 test_tts*
-# 平台 SSH 公钥（公开信息，随仓库走，换机器/新建卡片不用再配置一遍）
-!config/ssh/
-!config/ssh/authorized_keys
+
+# config/ 下大部分是本机私有配置（模型 key、token 都在里面），默认全部忽略
+config/*
+# 例外 1：平台注入文件（要进仓库，卡片会用到）
+!config/rules/systemreadme.md
+!config/rules/run_claude.js
+# 例外 2：模型配置目录 —— 只放行文档与脱敏模板
+!config/claude/
+config/claude/*
+!config/claude/README.md
+!config/claude/examples/
+!config/claude/examples/*.bak
+# 注意：真实的 config.json* / settings.json* 绝不入库
+#（历史上 config.json.deepseekv4pro 带着真 key 进过公开仓库，导致泄漏）
+config/claude/config.json*
+config/claude/settings.json*
+config/claude/web_env
+config/claude/web_password
+config/claude/*.bak
