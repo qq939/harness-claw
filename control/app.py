@@ -181,6 +181,29 @@ THINKING_LEVEL_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
 THINKING_LEVELS = ("high", "medium", "low")
 THINKING_LEVEL_LABELS = {"high": "高", "medium": "中", "low": "低"}
 
+# ---------------------------------------------------------------------------
+# WebSocket 鉴权
+#   所有 ws 接口都必须带 ?token=<WS_TOKEN>，否则直接关闭连接。
+#   WS_TOKEN 来自环境变量 HARNESS_WS_TOKEN，默认 "agent"。
+#   为什么必须加：/ws/ssh 会用写死的 agent/agent 登进任意卡片，
+#   2026-10-22 的入侵就是从公网无鉴权的面板进来的。
+# ---------------------------------------------------------------------------
+WS_TOKEN_ENV = "HARNESS_WS_TOKEN"
+WS_TOKEN_DEFAULT = "agent"
+
+
+def ws_token():
+    return (os.environ.get(WS_TOKEN_ENV) or WS_TOKEN_DEFAULT).strip()
+
+
+def ws_token_ok():
+    """校验请求里的 ?token= 是否正确（比较时不做大小写折叠）。"""
+    given = (request.args.get("token") or "").strip()
+    expected = ws_token()
+    if not expected:
+        return True
+    return given == expected
+
 
 def _settings_json_paths(config_root="/config"):
     """settings.json 及其 profile 变体（settings.json.deepseek 等），默认配置排最前。"""
@@ -1219,7 +1242,8 @@ def create_app(docker_client=None):
     fitAddon.fit();
 
     const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = wsProtocol + '//' + location.host + '/ws/ssh?container={container_name}';
+    const WS_TOKEN = '{ws_token()}';
+    const wsUrl = wsProtocol + '//' + location.host + '/ws/ssh?container={container_name}&token=' + encodeURIComponent(WS_TOKEN);
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {{
@@ -1250,6 +1274,17 @@ def create_app(docker_client=None):
     @sock.route("/ws/ssh")
     def ws_ssh(ws):
         import threading
+        # 鉴权：没有正确 token 直接拒绝（不泄露任何信息）
+        if not ws_token_ok():
+            try:
+                ws.send('{"type":"error","message":"unauthorized: missing or bad token"}')
+            except Exception:
+                pass
+            try:
+                ws.close()
+            except Exception:
+                pass
+            return
         container_name = request.args.get("container")
         if not container_name:
             ws.close()
@@ -2593,6 +2628,18 @@ def create_app(docker_client=None):
         except Exception as e:
             return jsonify({"error": f"Recreate failed: {e}"}), 500
         return jsonify({"ok": True, "mappings": [f"{p['container']}:{p['host']}" for p in extra_ports]})
+
+    @app.before_request
+    def _ws_token_guard():
+        """WebSocket 接口必须带 token：在握手之前就拦掉（否则会先回 101 再被踢）。
+
+        flask_sock 的 upgrade 发生在路由函数里，所以要在 before_request 阶段拦，
+        未授权的客户端拿到的是 401，而不是「握手成功然后断开」。
+        """
+        path = request.path or ""
+        if path.startswith("/ws") and not ws_token_ok():
+            return jsonify({"error": "unauthorized", "path": path}), 401
+        return None
 
     @app.get("/")
     def index():

@@ -12,6 +12,15 @@ RUN for i in 1 2 3 4 5; do \
 
 RUN npm install -g @anthropic-ai/claude-code@2.0.69
 
+# Python web 栈：卡片里要能直接跑 web app（WebShell 等），不靠运行时 pip install
+# （容器重建会清掉容器层里装的东西，装在镜像里才活得久）。
+#   flask / flask-sock : HTTP + WebSocket
+#   paramiko           : SSH 客户端（网页终端连别的机器）
+RUN pip install --no-cache-dir --break-system-packages \
+        flask==3.0.3 \
+        flask-sock==0.7.0 \
+        paramiko==3.4.0
+
 RUN useradd -m -s /bin/bash -u 501 -g 20 agent \
     && echo "agent:agent" | chpasswd \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent \

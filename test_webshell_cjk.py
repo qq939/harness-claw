@@ -29,7 +29,30 @@ TIMEOUT_SECONDS = 120
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WS = os.path.join(ROOT, "workspaces", "19087-gpussh")
 CARD = os.environ.get("WEBSHELL_CARD", "19087-gpussh")
-URL = os.environ.get("WEBSHELL_WS", "ws://localhost:19087/webshell/ws/host")
+# 2026-10-25 重写后：ws 路径是 /ws/<session_id>，且必须带 token
+TOKEN = os.environ.get("WEBSHELL_TOKEN", "agent")
+SESSION = os.environ.get("WEBSHELL_SESSION", "local-selftest")
+URL = os.environ.get(
+    "WEBSHELL_WS",
+    "ws://localhost:19087/ws/%s?token=%s" % (SESSION, TOKEN),
+)
+
+
+def ensure_selftest_session():
+    """建一条指向卡片自己（127.0.0.1:22, agent/agent）的自测会话。
+
+    旧的 dimond.top 会话口令已失效，不能再拿来做自动化校验。
+    """
+    import urllib.request
+    body = {"id": SESSION, "name": "自测（本机）", "host": "127.0.0.1", "port": 22,
+            "user": "agent", "auth": "password", "password": "agent",
+            "init_command": "export LANG=C.UTF-8 LC_ALL=C.UTF-8 LC_CTYPE=C.UTF-8"}
+    req = urllib.request.Request(
+        "http://localhost:19087/api/sessions?token=%s" % TOKEN,
+        data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.status == 200
 
 failures = []
 skips = []
@@ -52,14 +75,13 @@ def skip(name, reason):
 
 
 def run_static():
-    bp = open(os.path.join(WS, "tools_hub", "webshell_bp.py"), "r", encoding="utf-8").read()
-    check("有 OutputDecoder", "class OutputDecoder" in bp)
-    check("reader 用 decoder.feed", "decoder.feed(data)" in bp)
-    check("GBK 回退", '"gbk"' in bp)
-    check("中文字体回退", "Microsoft YaHei" in bp and "Noto Sans Mono CJK" in bp)
-    check("登录后设置 UTF-8 locale", "init_command" in bp and "chan.send(init_cmd" in bp)
-    srv = open(os.path.join(WS, "webshell_server.py"), "r", encoding="utf-8").read()
-    check("ws 别名入口也用 decoder", "_decoder.feed(data)" in srv)
+    # 2026-10-25：webshell 重写为单文件 webshell_server.py（原来拆成 tools_hub/webshell_bp.py + webshell/ 包）
+    src = open(os.path.join(WS, "webshell_server.py"), "r", encoding="utf-8").read()
+    check("有 OutputDecoder", "class OutputDecoder" in src)
+    check("reader 用 decoder.feed", "decoder.feed(data)" in src)
+    check("GBK 回退", '"gbk"' in src)
+    check("中文字体回退", "Microsoft YaHei" in src and "Noto Sans Mono CJK" in src)
+    check("登录后设置 UTF-8 locale", "init_command" in src and "chan.send(init" in src)
 
 
 def ws_run(cmd, expect, pre_wait=0.0):
@@ -96,7 +118,10 @@ def run_live():
         skip("线上终端中文", "websocket-client 不可用: %s" % e)
         return
     try:
-        ok, data = ws_run("echo 中文测试", "中文测试")
+        if not ensure_selftest_session():
+            skip("线上终端中文", "无法创建自测会话")
+            return
+        ok, data = ws_run("echo 中文测试", "中文测试", pre_wait=1.2)
         check("UTF-8 中文回显正确", ok)
         if not ok:
             print("   -> %r" % data[:200], flush=True)
