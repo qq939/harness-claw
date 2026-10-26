@@ -1,0 +1,16 @@
+{
+  "default_upstream": "minimax",
+  "upstreams": {
+    "minimax": {
+      "base_url": "https://api.minimaxi.com/anthropic",
+      "api_key": "REPLACE_WITH_REAL_KEY",
+      "models": ["MiniMax-M3.1-Flash"]
+    },
+    "deepseek": {
+      "base_url": "https://api.deepseek.com/anthropic",
+      "api_key": "REPLACE_WITH_REAL_KEY",
+      "models": ["deepseek-flash", "deepseek-v4-flash"],
+      "aliases": ["deepseek-flash"]
+    }
+  }
+}

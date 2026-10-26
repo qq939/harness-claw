@@ -19,8 +19,8 @@
   A) 纯逻辑（从 control/app.py 抽出嵌套 helper 直接跑，无需 flask/docker）
      1) _host_model_profiles() 能扫出"默认 + 本分支实际存在的 profile"且模型 id 正确。
      2) _match_profile() 用 base_url + provider 名 / 模型 id 消歧：
-        - 同域名的 deepseek / deepseek-flash 必须区分开
-        - minimax（api.minimaxi.com）能匹配
+        - 网关化之后各档位有各自的路径前缀（/deepseek、/deepseek-flash、/minimax）
+        - 默认档与 deepseek-flash 档共用端点时，靠 provider 名 / 模型 id 区分开
         - 未知端点返回 None
   B) 静态：control/app.py 里不得再出现旧的域名猜测（model_map）。
   C) 线上：抓每张卡片的 /current-model，模型信息必须非空且不含 unknown。
@@ -45,13 +45,15 @@ CONTROL = os.environ.get("CONTROL_URL", "http://localhost:18080")
 
 # profile -> (ANTHROPIC_MODEL, base_url)
 # 本分支实际存在的 profile（config/claude/ 下的 settings.json.<p> + config.json.<p>）：
-#   deepseek       -> deepseek-v4-flash @ api.deepseek.com
-#   deepseek-flash -> deepseek-flash    @ api.deepseek.com（V4.1-Flash）
-#   minimax        -> MiniMax-M3.1-Flash @ api.minimaxi.com（国内版官方端点）
+# 所有端点都指向 hermit-llm-gateway，云端 key 只留在网关上（见 test_llm_gateway.py）：
+#   deepseek       -> deepseek-v4-flash @ .../deepseek
+#   deepseek-flash -> deepseek-flash    @ .../deepseek-flash（V4.1-Flash）
+#   minimax        -> MiniMax-M3.1-Flash @ .../minimax
+GATEWAY = "http://hermit-llm-gateway:8083"
 EXPECT_PROFILES = {
-    "minimax": ("MiniMax-M3.1-Flash", "https://api.minimaxi.com/anthropic"),
-    "deepseek": ("deepseek-v4-flash", "https://api.deepseek.com/anthropic"),
-    "deepseek-flash": ("deepseek-flash", "https://api.deepseek.com/anthropic"),
+    "minimax": ("MiniMax-M3.1-Flash", GATEWAY + "/minimax"),
+    "deepseek": ("deepseek-v4-flash", GATEWAY + "/deepseek"),
+    "deepseek-flash": ("deepseek-flash", GATEWAY + "/deepseek-flash"),
 }
 
 failures = []
@@ -149,23 +151,23 @@ def card_fixtures():
     return {
         # 文件与进程 env 一致：能精确匹配到 minimax profile
         "minimax-in-sync": (
-            settings("https://api.minimaxi.com/anthropic", primary="MiniMax-M3.1-Flash"),
-            config("MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash", "https://api.minimaxi.com/anthropic"),
-            "https://api.minimaxi.com/anthropic", "MiniMax-M3.1-Flash",
+            settings(GATEWAY + "/minimax", primary="MiniMax-M3.1-Flash"),
+            config("MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash", GATEWAY + "/minimax"),
+            GATEWAY + "/minimax", "MiniMax-M3.1-Flash",
             {"in_sync": True, "model_id": "MiniMax-M3.1-Flash",
              "provider_name": "MiniMax-M3.1-Flash", "profile": "minimax",
              "configured_model_id": "MiniMax-M3.1-Flash"}),
-        # 同端点两兄弟：只有 provider 名 / 模型 id 能区分
+        # 与「默认档」共用同一端点：只有 provider 名 / 模型 id 能区分
         "deepseek-flash-in-sync": (
-            settings("https://api.deepseek.com/anthropic"),
-            config("DeepSeek-V4.1-Flash", "deepseek-flash", "https://api.deepseek.com/anthropic"),
-            "https://api.deepseek.com/anthropic", "deepseek-flash",
+            settings(GATEWAY + "/deepseek-flash"),
+            config("DeepSeek-V4.1-Flash", "deepseek-flash", GATEWAY + "/deepseek-flash"),
+            GATEWAY + "/deepseek-flash", "deepseek-flash",
             {"in_sync": True, "model_id": "deepseek-flash", "provider_name": "DeepSeek-V4.1-Flash",
              "profile": "deepseek-flash", "configured_model_id": "deepseek-flash"}),
         "deepseek-in-sync": (
-            settings("https://api.deepseek.com/anthropic"),
-            config("DeepSeek-V4-Flash", "deepseek-v4-flash", "https://api.deepseek.com/anthropic"),
-            "https://api.deepseek.com/anthropic", "deepseek-v4-flash",
+            settings(GATEWAY + "/deepseek"),
+            config("DeepSeek-V4-Flash", "deepseek-v4-flash", GATEWAY + "/deepseek"),
+            GATEWAY + "/deepseek", "deepseek-v4-flash",
             {"in_sync": True, "model_id": "deepseek-v4-flash", "provider_name": "DeepSeek-V4-Flash",
              "profile": "deepseek", "configured_model_id": "deepseek-v4-flash"}),
         # 旧卡片：端点已不在任何 profile 中（历史配置）
@@ -177,12 +179,12 @@ def card_fixtures():
              "profile": "", "configured_model_id": "MiniMax-M3"}),
         # 真实线上状态：文件已切到 minimax，但进程 env 还是建容器时的旧端点（env 优先）
         "stale-env": (
-            settings("https://api.minimaxi.com/anthropic", primary="MiniMax-M3.1-Flash"),
-            config("MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash", "https://api.minimaxi.com/anthropic"),
-            "https://api.deepseek.com/anthropic", "deepseek-flash",
+            settings(GATEWAY + "/minimax", primary="MiniMax-M3.1-Flash"),
+            config("MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash", GATEWAY + "/minimax"),
+            GATEWAY + "/deepseek-flash", "deepseek-flash",
             {"in_sync": False, "model_id": "deepseek-flash", "provider_name": "DeepSeek-V4.1-Flash",
              "profile": "deepseek-flash", "configured_model_id": "MiniMax-M3.1-Flash",
-             "effective_base_url": "https://api.deepseek.com/anthropic"}),
+             "effective_base_url": GATEWAY + "/deepseek-flash"}),
     }
 
 
@@ -228,7 +230,7 @@ def run_endpoint_dry_run():
     # 关键语义：env 优先 —— 头部必须报"实际生效"的端点，而不是文件里那个
     stale = endpoint("stale-env")
     check("stale env: headline is the effective (env) endpoint",
-          stale.get("base_url") == "https://api.deepseek.com/anthropic")
+          stale.get("base_url") == GATEWAY + "/deepseek-flash")
     check("stale env: headline model is the env model",
           stale.get("model_id") == "deepseek-flash")
     check("stale env: configured keeps the file model",
@@ -293,23 +295,28 @@ def run_logic():
         check("profiles: %s base_url=%s" % (p, base_url), entry["base_url"] == base_url)
         check("profiles: %s has provider_name" % p, bool(entry["provider_name"]))
 
-    # 同域名必须靠 provider 名消歧 —— 旧实现做不到的一组
-    for profile, provider in (("deepseek", "DeepSeek-V4-Flash"),
-                              ("deepseek-flash", "DeepSeek-V4.1-Flash")):
-        hit = match(profiles, "https://api.deepseek.com/anthropic", provider, "")
+    # 网关化之后每个档位有各自的路径前缀，端点本身就能区分
+    for profile, (_model, base_url) in EXPECT_PROFILES.items():
+        hit = match(profiles, base_url, "", "")
         got = (hit or {}).get("profile")
-        check("disambiguate deepseek pair -> %s (provider=%s)" % (profile, provider), got == profile)
+        check("match %s by base_url" % profile, got == profile)
+
+    # 默认档与 deepseek-flash 档共用同一端点：必须靠 provider 名 / 模型 id 消歧
+    hit = match(profiles, GATEWAY + "/deepseek-flash", "DeepSeek-V4.1-Flash", "deepseek-flash")
+    check("disambiguate default vs deepseek-flash -> deepseek-flash",
+          (hit or {}).get("profile") == "deepseek-flash")
 
     # minimax 只有一个档位（模型已统一为 MiniMax-M3.1-Flash），端点命中即可
-    hit = match(profiles, "https://api.minimaxi.com/anthropic", "MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash")
+    hit = match(profiles, GATEWAY + "/minimax", "MiniMax-M3.1-Flash", "MiniMax-M3.1-Flash")
     check("match minimax by base_url", (hit or {}).get("profile") == "minimax")
 
     # 末尾斜杠差异不应影响匹配
-    hit = match(profiles, "https://api.minimaxi.com/anthropic/", "MiniMax-M3.1-Flash", "")
+    hit = match(profiles, GATEWAY + "/minimax/", "MiniMax-M3.1-Flash", "")
     check("match tolerates trailing slash", (hit or {}).get("profile") == "minimax")
 
     # 不在任何 profile 里的端点 → None（面板应显示"无匹配"，而不是猜一个名字）
-    for url in ("https://api.anthropic.com", "https://api.minimax.cn/anthropic", ""):
+    for url in ("https://api.anthropic.com", "https://api.minimax.cn/anthropic",
+                "https://api.deepseek.com/anthropic", "https://api.minimaxi.com/anthropic", ""):
         hit = match(profiles, url, "Whatever", "whatever")
         check("no bogus match for %r" % (url or "<empty>"), hit is None)
 

@@ -9,6 +9,25 @@ networks:
         - subnet: 172.30.0.0/16
 
 services:
+  # 统一的大模型出口：所有云端 api key 只存在这一份（config/llm-gateway/upstreams.json，
+  # 已被 .gitignore 排除，不入库）。卡片容器不再各自持有 key，只带一个本地 token。
+  #
+  # 刻意**不发布宿主机端口**：服务只在 openclaw-network 内网可达，
+  # 容器间用服务名 hermit-llm-gateway 访问；宿主机/公网（含 frpc）都连不到。
+  hermit-llm-gateway:
+    build:
+      context: ./agents/llm-gateway
+      dockerfile: Dockerfile
+    container_name: hermit-llm-gateway
+    restart: unless-stopped
+    environment:
+      # 网关自身的鉴权口令：卡片用它调网关，网关再换上真正的云端 key
+      - LLM_GATEWAY_TOKEN=${LLM_GATEWAY_TOKEN:-agent}
+    volumes:
+      - ./config/llm-gateway:/agent-config:ro
+    networks:
+      - openclaw-network
+
   openclaw-gateway:
     build:
       context: ./agents/openclaw

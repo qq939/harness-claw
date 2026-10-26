@@ -74,6 +74,43 @@ Hermit 平台这两个 API 的理解和实际用法，ssh是兜底用法，实�
 
 ---
 
+## 7) 统一大模型出口 `hermit-llm-gateway`
+
+云端 api key 只存在**一处**：`config/llm-gateway/upstreams.json`（已被 `.gitignore` 排除，不入库）。
+卡片容器不再各自持有 key，只带一个本地口令。
+
+- **服务名**：`hermit-llm-gateway`，容器名同名
+- **内网地址**：`http://hermit-llm-gateway:8083`（只在 `openclaw-network` 内可达）
+- **不发布宿主机端口**：宿主机连 `127.0.0.1:8083` 会拒绝连接，也不在 `frpc.ini` 里，公网访问不到
+- **鉴权**：`token=agent`（可用 `LLM_GATEWAY_TOKEN` 覆盖），可放在 `?token=` / `Authorization: Bearer` / `x-api-key`
+
+### 卡片侧怎么配
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://hermit-llm-gateway:8083/minimax",
+    "ANTHROPIC_AUTH_TOKEN": "agent",
+    "ANTHROPIC_MODEL": "MiniMax-M3.1-Flash"
+  }
+}
+```
+
+路径前缀对应上游：`/minimax`、`/deepseek`（别名 `/deepseek-flash`）。
+网关会把本地口令换成真正的云端 key 再转发（`x-api-key` 和 `authorization` 两个头都会换）。
+
+### 接口
+
+| 接口 | 用途 |
+|-----|------|
+| `GET /health` | 免鉴权，列出已配置的上游 |
+| `GET /ask/claude?q=...&token=agent` | 问答接口，返回纯文本；`q` 支持明文或 base64，可加 `&upstream=minimax` |
+| `POST /<前缀>/v1/messages` | Anthropic 协议透传，支持 SSE 流式 |
+
+改 key 只需改 `config/llm-gateway/upstreams.json`，网关按文件 mtime 热加载，不必重启服务、不必重建卡片。
+
+---
+
 ### 1. `/ws/ssh` — WebSocket SSH 终端
 
 **端点**：`wss://hermit.dimond.top/ws/ssh?container={container_name}&token={WS_TOKEN}`

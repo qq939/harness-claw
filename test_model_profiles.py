@@ -2,14 +2,17 @@
 """TDD 校验：config/claude/ 下各模型 profile 配置文件正确可用。
 
 本分支的 profile（云端模型名已按官方文档核实）：
-  - deepseek                 -> deepseek-v4-flash      @ https://api.deepseek.com/anthropic
-  - deepseek-flash           -> deepseek-flash         @ https://api.deepseek.com/anthropic  (V4.1-Flash)
-  - minimax                  -> MiniMax-M3.1-Flash     @ https://api.minimaxi.com/anthropic    (国内版官方端点)
+  - deepseek                 -> deepseek-v4-flash      @ http://hermit-llm-gateway:8083/deepseek
+  - deepseek-flash           -> deepseek-flash         @ http://hermit-llm-gateway:8083/deepseek-flash
+  - minimax                  -> MiniMax-M3.1-Flash     @ http://hermit-llm-gateway:8083/minimax
+
+云端 api key 不再放在卡片配置里：卡片一律指向 hermit-llm-gateway，
+由网关换上真正的 key 转发（见 test_llm_gateway.py）。
 
 覆盖点：
   1) 每个 profile 两个文件都存在（config.json.<p> + settings.json.<p>）。
   2) config.json.X 的 ANTHROPIC_MODEL 为官方模型名。
-  3) base_url 正确（minimax 用 api.minimaxi.com，deepseek 用 api.deepseek.com）。
+  3) base_url 指向 hermit-llm-gateway 的对应前缀。
   4) 每个 config.json.X 都带 ANTHROPIC_AUTH_TOKEN（非空）。
   5) settings.json.X 的 env.ANTHROPIC_BASE_URL 与对应 config.json.X 一致。
   6) settings.json.X 的 primaryModel 对齐各自模型名。
@@ -30,10 +33,12 @@ CLAUDE_DIR = os.path.join(ROOT, "config", "claude")
 PROFILES_URL = os.environ.get("PROFILES_URL", "http://localhost:18080/api/config/profiles")
 
 # profile -> (config.json.X 里的 ANTHROPIC_MODEL, base_url)
+# 端点统一指向 hermit-llm-gateway（云端 key 只留在网关上）
+GATEWAY = "http://hermit-llm-gateway:8083"
 EXPECT = {
-    "deepseek": ("deepseek-v4-flash", "https://api.deepseek.com/anthropic"),
-    "deepseek-flash": ("deepseek-flash", "https://api.deepseek.com/anthropic"),
-    "minimax": ("MiniMax-M3.1-Flash", "https://api.minimaxi.com/anthropic"),
+    "deepseek": ("deepseek-v4-flash", GATEWAY + "/deepseek"),
+    "deepseek-flash": ("deepseek-flash", GATEWAY + "/deepseek-flash"),
+    "minimax": ("MiniMax-M3.1-Flash", GATEWAY + "/minimax"),
 }
 
 failures = []
