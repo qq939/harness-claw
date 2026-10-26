@@ -129,11 +129,11 @@ def run_static():
 
     # 3) 真实 key 文件不入库
     check("upstreams.json exists", os.path.isfile(UPSTREAMS_FILE))
-    ignored = sh(["git", "check-ignore", "-q", "config/llm-gateway/upstreams.json"], timeout=30)
-    tracked = sh(["git", "ls-files", "config/llm-gateway/"], timeout=30).strip()
-    check("upstreams.json is git-ignored", ignored.strip() == "" and "not ignored" not in ignored.lower(),
-          ignored.strip())
-    check("upstreams.json is not tracked by git", tracked == "", tracked)
+    ignored = sh(["git", "check-ignore", "-v", "config/llm-gateway/upstreams.json"], timeout=30).strip()
+    tracked = sh(["git", "ls-files", "--error-unmatch", "config/llm-gateway/upstreams.json"],
+                 timeout=30).strip()
+    check("upstreams.json is git-ignored", ".gitignore" in ignored, ignored)
+    check("upstreams.json is not tracked by git", "did not match any file" in tracked, tracked[:120])
     check("gitignore ignores config/*", re.search(r"^config/\*", gitignore, re.M) is not None)
 
     # 4) 卡片侧配置：只有 agent 口令 + 网关地址，没有任何云端 key
