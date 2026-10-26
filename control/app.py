@@ -31,6 +31,7 @@ import tempfile
 import uuid
 import threading
 import time
+import hmac
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from urllib.request import urlopen, Request
@@ -82,6 +83,14 @@ HOST_WORKSPACES_ROOT_ENV = "HOST_WORKSPACES_ROOT"
 # HOST_TOOLS_ROOT_ENV: 宿主机 tools 目录环境变量名，用于把 tools 源码挂载到每个容器卡片工作目录下。
 # 使用位置：create_app（解析 app.config["HOST_TOOLS_ROOT"]，约 L154）；create_agent / recreate_agent（读取 host_tools_root 并挂载 volume）。
 HOST_TOOLS_ROOT_ENV = "HOST_TOOLS_ROOT"
+
+# WS_TOKEN_ENV: WebSocket 鉴权 token 的环境变量名。
+# 所有 WS 端点（control 的 /ws/ssh、obs 的 /ws、ssh-gateway）统一用这一个 token，
+# 由 docker-compose 通过 ${WS_TOKEN:-agent} 注入；未设置时回退到 agent。
+# 使用位置：create_app（读入 app.config["WS_TOKEN"]）；ws_ssh（校验）；api_agent_ssh_terminal（把 token 注入页面）。
+WS_TOKEN_ENV = "WS_TOKEN"
+# WS_TOKEN_DEFAULT: WS_TOKEN 未设置时的默认 token 值。
+WS_TOKEN_DEFAULT = "agent"
 
 # HUB_API_URL: 容器内访问 18081 Hub 注册接口的地址。
 # host.docker.internal 指向宿主机（18081 已发布到宿主机），比走公网域名更可靠。
@@ -211,6 +220,16 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def ws_token_ok(expected, provided):
+    """校验 WS 端点带回来的 token 是否与服务端一致。
+
+    用 hmac.compare_digest 做定长比较，避免按字符试探出正确 token。
+    """
+    if not expected or not provided:
+        return False
+    return hmac.compare_digest(str(expected), str(provided))
+
+
 def create_app(docker_client=None):
     app = Flask(__name__)
     sock = Sock(app)
@@ -240,6 +259,8 @@ def create_app(docker_client=None):
     app.config["HOST_LOGS_ROOT"] = os.path.join(os.path.dirname(host_ws), "logs")
     # 宿主机 tools 目录（项目根下 tools/），默认由 HOST_WORKSPACES_ROOT 推导（<项目根>/tools），可被 HOST_TOOLS_ROOT 覆盖。
     app.config["HOST_TOOLS_ROOT"] = os.environ.get(HOST_TOOLS_ROOT_ENV) or os.path.join(os.path.dirname(host_ws), "tools")
+    # WS 鉴权 token：所有 WS 端点共用同一个，未设置时回退到 agent。
+    app.config["WS_TOKEN"] = os.environ.get(WS_TOKEN_ENV) or WS_TOKEN_DEFAULT
 
     def docker_client_or_default():
         configured = app.config.get("DOCKER_CLIENT")
@@ -1038,6 +1059,8 @@ def create_app(docker_client=None):
         try:
             container = docker_client_or_default().containers.get(name)
             container_name = container.name
+            # WS 鉴权 token 随页面下发，页面自身的访问控制即 token 的分发边界。
+            ws_token_js = json.dumps(app.config["WS_TOKEN"])
             html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1061,7 +1084,9 @@ def create_app(docker_client=None):
     fitAddon.fit();
 
     const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = wsProtocol + '//' + location.host + '/ws/ssh?container={container_name}';
+    const wsUrl = wsProtocol + '//' + location.host + '/ws/ssh?container='
+      + encodeURIComponent({container_name!r})
+      + '&token=' + encodeURIComponent({ws_token_js});
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {{
@@ -1092,6 +1117,14 @@ def create_app(docker_client=None):
     @sock.route("/ws/ssh")
     def ws_ssh(ws):
         import threading
+        # token 鉴权：没有正确 token 的连接一律拒绝，不进入 SSH 隧道。
+        if not ws_token_ok(app.config["WS_TOKEN"], request.args.get("token")):
+            try:
+                ws.close(4401, "invalid token")
+            except Exception:
+                pass
+            return
+
         container_name = request.args.get("container")
         if not container_name:
             ws.close()
