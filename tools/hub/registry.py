@@ -60,7 +60,7 @@ EXAMPLE_TOOL = {
 | POST | `/upload/init` | 初始化断点续传会话 |
 | PUT | `/upload/chunk/{upload_id}/{index}` | 上传分片 |
 | POST | `/upload/complete/{upload_id}` | 合并分片完成上传 |
-| WS | `/ws` | 公告板 WebSocket |
+| WS | `/ws?token={WS_TOKEN}` | 公告板 WebSocket（需带 token 查询参数） |
 | GET | `/notice` | 获取公告板内容 |
 | POST | `/notice` | 更新公告板内容 |
 | POST | `/save_notice` | 保存公告板为文件 |

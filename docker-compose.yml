@@ -44,6 +44,9 @@ services:
       - PUBLIC_PREVIEW_BASE_URL=http://dimond.top
       - OPENCLAW_GATEWAY_HOST=172.30.0.10
       - OPENCLAW_GATEWAY_PORT=18790
+      # WS 端点鉴权 token：三个 WS 服务（control / obs / ssh-gateway）共用同一个。
+      # 未设置 WS_TOKEN 时回退到 agent；正式环境建议在 .env 里覆盖（.env 已被 .gitignore 排除）。
+      - WS_TOKEN=${WS_TOKEN:-agent}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -70,6 +73,7 @@ services:
     environment:
       - HOST_PORT=18000
       - TOOLS_HUB_URL=http://host.docker.internal:18081
+      - WS_TOKEN=${WS_TOKEN:-agent}
     volumes:
       - ./tools/obs/obs:/app/obs
     networks:
@@ -126,6 +130,7 @@ services:
       - DOCKER_HOST=host.docker.internal
       - SSH_USER=agent
       - SSH_PASS=agent
+      - WS_TOKEN=${WS_TOKEN:-agent}
     volumes:
       - ./config/rules:/config/rules:rw
     networks:

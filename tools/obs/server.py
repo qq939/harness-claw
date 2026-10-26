@@ -3,6 +3,7 @@ import shutil
 import json
 import asyncio
 import threading
+import hmac
 from datetime import datetime
 from urllib.parse import quote, unquote
 from urllib.request import Request as URLRequest, urlopen as urlopen_req
@@ -26,6 +27,23 @@ load_dotenv("asset/.env")
 PORT = int(os.environ.get("PORT", 8082))
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "obs")
 TOOLS_HUB_URL = os.environ.get("TOOLS_HUB_URL", "http://host.docker.internal:18081")
+# WS_TOKEN: WebSocket 鉴权 token 环境变量名，与 control / ssh-gateway 用同一个。
+WS_TOKEN_ENV = "WS_TOKEN"
+# WS_TOKEN_DEFAULT: WS_TOKEN 未设置时的默认 token 值。
+WS_TOKEN_DEFAULT = "agent"
+
+
+def get_ws_token() -> str:
+    """读取 WS 鉴权 token；未设置时回退到默认值。"""
+    return os.environ.get(WS_TOKEN_ENV) or WS_TOKEN_DEFAULT
+
+
+def ws_token_ok(provided: Optional[str]) -> bool:
+    """校验 WS 连接带来的 token 是否与服务端一致（定长比较，防逐字符试探）。"""
+    expected = get_ws_token()
+    if not expected or not provided:
+        return False
+    return hmac.compare_digest(expected, provided)
 
 # OBS 工具注册信息
 OBS_TOOL_INFO = {
@@ -56,7 +74,7 @@ OBS_TOOL_INFO = {
 | POST | `/upload/init` | 初始化断点续传会话 |
 | PUT | `/upload/chunk/{upload_id}/{index}` | 上传分片 |
 | POST | `/upload/complete/{upload_id}` | 合并分片完成上传 |
-| WS | `/ws` | 公告板 WebSocket |
+| WS | `/ws?token={WS_TOKEN}` | 公告板 WebSocket（需带 token 查询参数） |
 | GET | `/notice` | 获取公告板内容 |
 | POST | `/notice` | 更新公告板内容 |
 | POST | `/save_notice` | 保存公告板为文件 |
@@ -177,6 +195,11 @@ async def update_notice(content: str):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    # token 鉴权：在 accept 之前拒绝，避免未鉴权的连接进入公告板广播。
+    if not ws_token_ok(websocket.query_params.get("token")):
+        await websocket.close(code=4401, reason="invalid token")
+        return
+
     await manager.connect(websocket)
     try:
         # 发送初始化内容
@@ -673,8 +696,10 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
                 
                 // WebSocket connection
                 const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                // 使用当前 host 和 protocol 连接 WebSocket，路径为 /ws
-                const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+                // WS 鉴权 token（服务端随页面下发）
+                const WS_TOKEN = {ws_token};
+                // 使用当前 host 和 protocol 连接 WebSocket，路径为 /ws，并带上鉴权 token
+                const wsUrl = `${wsProtocol}//${window.location.host}/ws?token=${encodeURIComponent(WS_TOKEN)}`;
                 
                 let ws;
                 let isConnected = false;
@@ -786,6 +811,8 @@ async def homepage(request: Request, sort: str = Query("time", enum=["time", "ex
     time_active = "active" if sort != 'ext' else ""
     ext_active = "active" if sort == 'ext' else ""
     html = html.replace("{time_active}", time_active).replace("{ext_active}", ext_active)
+    # 注入 WS 鉴权 token，页面自身的访问控制即 token 的分发边界。
+    html = html.replace("{ws_token}", json.dumps(get_ws_token()))
     
     host = "obs.dimond.top"
     if not files_list:

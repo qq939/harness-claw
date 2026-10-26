@@ -1,11 +1,23 @@
 const { WebSocketServer } = require('ws');
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const http = require('http');
 
 const PORT = process.env.PORT || 8080;
 const DOCKER_HOST = process.env.DOCKER_HOST || 'host.docker.internal';
 const SSH_USER = process.env.SSH_USER || 'agent';
 const SSH_PASS = process.env.SSH_PASS || 'agent';
+// WS 鉴权 token：与 control / obs 用同一个 WS_TOKEN，未设置时回退到 agent。
+const WS_TOKEN = process.env.WS_TOKEN || 'agent';
+
+// 定长比较，避免按字符试探出正确 token
+function tokenOk(provided) {
+    if (!WS_TOKEN || !provided) return false;
+    const a = Buffer.from(String(provided));
+    const b = Buffer.from(WS_TOKEN);
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+}
 
 const server = http.createServer((req, res) => {
     if (req.url === '/health') {
@@ -21,6 +33,14 @@ const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws, req) => {
     const url = new URL(req.url, `http://localhost`);
+
+    // token 鉴权：没有正确 token 的连接一律拒绝，不启动 SSH 隧道。
+    if (!tokenOk(url.searchParams.get('token'))) {
+        console.log('WS connection rejected: invalid token');
+        ws.close(4401, 'invalid token');
+        return;
+    }
+
     const targetPort = url.searchParams.get('port');
 
     if (!targetPort) {

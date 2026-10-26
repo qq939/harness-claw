@@ -76,18 +76,23 @@ Hermit 平台这两个 API 的理解和实际用法，ssh是兜底用法，实�
 
 ### 1. `/ws/ssh` — WebSocket SSH 终端
 
-**端点**：`wss://hermit.dimond.top/ws/ssh?container={container_name}`
+**端点**：`wss://hermit.dimond.top/ws/ssh?container={container_name}&token={WS_TOKEN}`
 
 **本质**：一个浏览器端的 SSH 终端，通过 WebSocket 隧道连接到容器内部的 shell。
+
+**鉴权**：该端点要求带 `token` 查询参数，值取自部署时的 `WS_TOKEN` 环境变量（未设置时回退到 `agent`）。
+不带 token 或 token 不对，连接会立刻被关闭（close code 4401），拿不到 shell。
+控制台的"SSH终端"页面会由服务端自动把 token 注入页面，手工用脚本连则需自行带上。
 
 **发现方式**：从 Hermit 控制台页面看到每个卡片有个"SSH终端"按钮，点击后加载一个 xterm.js 终端，连接的就是这个 WebSocket。
 
 **实际用法**（我验证过的）：
 ```python
-import websocket, time
+import os, websocket, time
 
+token = os.environ.get("WS_TOKEN", "agent")
 ws = websocket.create_connection(
-    'wss://hermit.dimond.top/ws/ssh?container=18091-coffeecupgirl', 
+    'wss://hermit.dimond.top/ws/ssh?container=18091-coffeecupgirl&token=' + token,
     timeout=15
 )
 # 连上后会有 Debian 欢迎信息 + 自动 cd 到 project 目录
