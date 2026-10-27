@@ -193,6 +193,9 @@ for f in test_*.py; do echo "== $f"; py -3 "$f"; done
 
 ## 五、约定
 
+- **建卡必须同时具备 webapp（人用的页面）和 api（程序调用的接口）**，缺一不算完成：
+  `GET /` 是能操作的 HTML 页面，`GET /api/...` 是结构化 JSON 接口，页面按钮直接调同一套 api；
+  `GET /health` 返回 `{"ok": true}`；写操作带 token（默认 `agent`）。
 - 远程仓库名必须以 `harness` 开头（`harness-xxx`）。
 - 每张卡片的项目目录必须是 git 仓库，每次对话后提交。
 - 每张卡片的对外能力注册到 **19081 Hub**，供别的卡片调用。
