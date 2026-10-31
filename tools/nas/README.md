@@ -13,10 +13,10 @@
 - `nas-shell`：给宿主机自己用的 SSH 入口，**替代「远程调试 + 手机验证码」**。里面挂了
   `/var/run/docker.sock`（容器里能直接 `docker ps/logs/exec`）和 `/mnt/dm-0`（直接读写 20T 存储）。
 
-内容目录做了两个软链接（都指向 `dockerImage/ocs`，也就是里面的 `obs/` 文件、`hls/`、`logs/`）：
+内容目录 `obs/`（上传的视频/文档都在这）做了两个软链接：
 
-- `/ocs` —— 宿主根目录，`ssh nas hostshell` 后直接 `cd /ocs`
-- `/mnt/dm-0/.ugreen_nas/137045/ocs` —— 存储卷用户目录根，UGOS 文件管理器里能直接看到
+- `/obs` —— 宿主根目录，`ssh nas hostshell` 后直接 `cd /obs`
+- `/mnt/dm-0/.ugreen_nas/137045/obs` —— 存储卷用户目录根，UGOS 文件管理器里能直接看到
 
 ## 访问
 
