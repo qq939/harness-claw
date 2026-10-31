@@ -964,37 +964,7 @@ def create_app(docker_client=None):
         )
         _d("create", f"container.run() done, id={container.id}")
 
-        if not body.get("skip_initial_message"):
-            _d("create", "sending initial message...")
-            import time
-            time.sleep(3)
-            user_msg = (body.get("message") or "").strip()
-            msg_file = "/tmp/send_msg.sh"
-            if agent_type in ("claude", "ollama"):
-                agent_states[container_name] = "thinking"
-                default_msg = INITIAL_MESSAGE.format(agent="claude")
-                log_path = "/home/agent/.claude/workspace/project/logs/agent_tui.log"
-                msg_to_send = user_msg or default_msg
-                escaped_msg = msg_to_send.replace("'", "'\"'\"'")
-                msg_b64 = __import__('base64').b64encode(msg_to_send.encode('utf-8')).decode('ascii')
-                script = f"CLAUDE_MSG='{msg_b64}' node /home/agent/.claude/workspace/project/run_claude.js >> '{log_path}' 2>&1"
-            else:
-                default_msg = INITIAL_MESSAGE.format(agent="openclaw")
-                log_path = "/home/agent/.openclaw/workspace/project/logs/agent_tui.log"
-                msg_to_send = user_msg or default_msg
-                escaped_msg = msg_to_send.replace("'", "'\"'\"'")
-                msg_b64 = __import__('base64').b64encode(msg_to_send.encode('utf-8')).decode('ascii')
-                script = f"node -e 'const fs=require(\"fs\"); const p=process.env.HOME+\"/.openclaw/openclaw.json\"; const j=JSON.parse(fs.readFileSync(p,\"utf8\")); delete j.gateway.bind; delete j.gateway.mode; fs.writeFileSync(p,JSON.stringify(j));'; echo '{msg_b64}' | base64 -d | openclaw agent --session-id main -m \"$(cat)\" >> '{log_path}' 2>&1"
-            try:
-                ts = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-                container.exec_run(["/bin/sh", "-c", f"echo '[{ts}] $ {escaped_msg}' >> '{log_path}'"], user=AGENT_RUNTIME_USER)
-                _d("create", "msg written to log")
-                container.exec_run(["/bin/sh", "-c", f"echo '{script}' > {msg_file} && chmod +x {msg_file}"], user=AGENT_RUNTIME_USER)
-                _d("create", "script written to /tmp")
-                container.exec_run(["/bin/sh", "-lc", f"nohup {msg_file} >> '{log_path}' 2>&1 &"], user=AGENT_RUNTIME_USER, detach=True)
-                _d("create", "nohup launched")
-            except Exception as e:
-                _d("create", f"initial message error: {e}")
+# 2026-10-28：建卡不再发初始消息（规范/目标改为每轮消息后缀，见 run_claude.js）
 
         result = {
             "container_name": container.name,
@@ -1662,12 +1632,16 @@ def create_app(docker_client=None):
             container = _require_managed(name)
             labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
             agent_type = labels.get("hermit.agent_type", "")
-            default_msg = INITIAL_MESSAGE.format(agent="claude" if agent_type in ("claude", "ollama") else "openclaw")
+            # 2026-10-28：空消息不再回退成 INITIAL_MESSAGE——
+            # 规范/终极目标由 run_claude.js 拼到每条消息末尾，空消息就是空消息
+            # （带图片时允许空文字）。
             # 带图发送：确认 tmp.png 真的在卡片工作目录里（run_claude.js 会读它）
             image_attached = False
             if with_image:
                 image_attached = os.path.exists(os.path.join(app.config["WORKSPACES_ROOT"], name, "tmp.png"))
-            ok, err = _dispatch_to_agent(container, name, agent_type, message or default_msg,
+            if not message and not image_attached:
+                return jsonify({"error": "message is required"}), 400
+            ok, err = _dispatch_to_agent(container, name, agent_type, message,
                                          with_image=image_attached)
             if not ok:
                 return jsonify({"error": err}), 500
@@ -2398,19 +2372,7 @@ def create_app(docker_client=None):
             else:
                 scp_rules_to_container(payload["container_name"], "/home/agent/.openclaw/workspace/project")
                 project_path = "/home/agent/.openclaw/workspace/project"
-            default_msg = INITIAL_MESSAGE.format(agent="claude" if agent_type in ("claude", "ollama") else "openclaw")
-            msg_b64 = __import__('base64').b64encode(default_msg.encode('utf-8')).decode('ascii')
-            msg_file = "/tmp/send_msg.sh"
-            if agent_type in ("claude", "ollama"):
-                script = f"CLAUDE_MSG='{msg_b64}' node {project_path}/run_claude.js >> '{project_path}/logs/agent_tui.log' 2>&1"
-            else:
-                script = f"echo '{msg_b64}' | base64 -d | openclaw agent --session-id main -m \"$(cat)\" >> '{project_path}/logs/agent_tui.log' 2>&1"
-            try:
-                container_new = docker_client_or_default().containers.get(payload["container_name"])
-                container_new.exec_run(["/bin/sh", "-c", f"echo '{script}' > {msg_file} && chmod +x {msg_file}"], user=AGENT_RUNTIME_USER)
-                container_new.exec_run(["/bin/sh", "-lc", f"nohup {msg_file} >> '{project_path}/logs/agent_tui.log' 2>&1 &"], user=AGENT_RUNTIME_USER, detach=True)
-            except Exception as e:
-                print(f"[recreate] send initial message failed: {e}", flush=True, file=sys.stderr)
+            # 2026-10-28：重建也不再发初始消息（规范/终极目标改为每轮消息后缀，见 run_claude.js）
             return jsonify(payload)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400

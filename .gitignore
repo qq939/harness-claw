@@ -31,6 +31,7 @@ config/*
 # 例外 1：平台注入文件（要进仓库，卡片会用到）
 !config/rules/systemreadme.md
 !config/rules/run_claude.js
+!config/rules/initial_message.md
 # 例外 2：模型配置目录 —— 只放行文档与脱敏模板
 !config/claude/
 config/claude/*
