@@ -9,9 +9,14 @@ IMPORT="$BASE/_import"
 OCS="$BASE/ocs"
 SHELL_DIR="$BASE/nas-shell"
 NAS_IP="${NAS_IP:-192.168.0.201}"
-OCS_PORT="${OCS_PORT:-8080}"
+OCS_PORT="${OCS_PORT:-80}"          # 80 = 浏览器输 IP 就能访问（UGOS 自己的界面在 9999）
+OCS_PORT_ALT="${OCS_PORT_ALT:-8080}" # 保留 8080，老链接/习惯用法仍可用
 SSH_PORT="${SSH_PORT:-2222}"
-BASE_URL="http://${NAS_IP}:${OCS_PORT}"
+if [ "$OCS_PORT" = "80" ]; then
+    BASE_URL="http://${NAS_IP}"
+else
+    BASE_URL="http://${NAS_IP}:${OCS_PORT}"
+fi
 
 echo "== 1. 载入镜像 =="
 docker load -i "$IMPORT/ocs-nas.tar.gz" | tail -2
@@ -22,11 +27,12 @@ mkdir -p "$OCS/obs" "$OCS/hls" "$OCS/logs" "$SHELL_DIR/ssh"
 chmod 777 "$OCS" "$OCS/obs" "$OCS/hls" "$OCS/logs"
 chmod 700 "$SHELL_DIR/ssh"
 
-echo "== 3. OCS 容器（${OCS_PORT} -> 8082）=="
+echo "== 3. OCS 容器（${OCS_PORT} -> 8082，另挂 ${OCS_PORT_ALT}）=="
 docker rm -f ocs >/dev/null 2>&1 || true
 docker run -d --name ocs --restart=always \
   --log-opt max-size=10m --log-opt max-file=3 \
   -p "${OCS_PORT}:8082" \
+  -p "${OCS_PORT_ALT}:8082" \
   -e TZ=Asia/Shanghai \
   -e PORT=8082 \
   -e UPLOAD_DIR=/data/obs \

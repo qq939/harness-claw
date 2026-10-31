@@ -4,19 +4,21 @@
 
 | 容器 | 端口 | 数据目录（`/mnt/dm-0/.ugreen_nas/137045/dockerImage/`） |
 |---|---|---|
-| `ocs` | 8080 → 8082 | `ocs/`（`obs/` 文件、`hls/` 切片、`logs/` 日志） |
+| `ocs` | **80 → 8082**（另挂 8080 → 8082） | `ocs/`（`obs/` 文件、`hls/` 切片、`logs/` 日志） |
 | `nas-shell` | 2222 → 22 | `nas-shell/`（`ssh/authorized_keys`、`root_password`） |
 
 - `ocs`：就是卡片里跑的 `src/obs/server.py`，用 `ocs-nas` 镜像；对外地址通过
-  `URL_HEAD` / `OCS_LOCAL_BASE` / `OCS_FALLBACK_BASE` 三个环境变量指到 `http://192.168.0.201:8080`。
+  `URL_HEAD` / `OCS_LOCAL_BASE` / `OCS_FALLBACK_BASE` 三个环境变量指到 `http://192.168.0.201`。
+  挂在 80 上是为了「浏览器直接输 IP」——UGOS 自己的管理界面在 **9999**，80/443 都空着。
 - `nas-shell`：给宿主机自己用的 SSH 入口，**替代「远程调试 + 手机验证码」**。里面挂了
   `/var/run/docker.sock`（容器里能直接 `docker ps/logs/exec`）和 `/mnt/dm-0`（直接读写 20T 存储）。
 
 ## 访问
 
 ```bash
-# OCS
-http://192.168.0.201:8080/
+# OCS：不用输端口（浏览器默认就是 http://IP 走 80）
+http://192.168.0.201/
+http://192.168.0.201:8080/     # 备用，老链接仍可用
 
 # SSH：容器 shell（里面有 docker CLI、/mnt/dm-0、宿主根目录在 /host）
 ssh nas
@@ -95,3 +97,6 @@ py -3 tools/nas/remote.py run "sh /mnt/dm-0/.ugreen_nas/137045/dockerImage/_impo
 3. dockerd 实际配置在 `/tmp/dockerd/daemon.json`（`--config-file`），不是 `/etc/docker/daemon.json`；
    data-root = `/mnt/dm-0/.ugreen_nas/6`，storage driver = overlay2，daemon 20.10.16。
 4. NAS 自己有定时关机任务（`/etc/crontabs/root` 里周一~周五 05:50 关机 + rtcwake 10 分钟后唤醒）。
+5. 关于 **443**：OCS 本身是纯 HTTP，挂 443 得配 TLS 证书（自签证书浏览器每次都会警告），
+   所以默认只挂 80。真要 `https://192.168.0.201`，得再起一个 TLS 终止（Caddy/nginx + 自签证书），
+   或者把 OCS 反代进 UGOS 自己 9999 的 nginx——后者会动 UGOS 的配置，不建议。
