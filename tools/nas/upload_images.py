@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from remote import connect  # noqa: E402
 
 REMOTE_DIR = os.environ.get("NAS_IMPORT_DIR", "/mnt/dm-0/.ugreen_nas/137045/dockerImage/_import")
-IMAGES = {"ocs": "tmp/ocs-nas.tar.gz", "shell": "tmp/nas-shell.tar.gz"}
+IMAGES = {"ocs": "tmp/ocs-nas.tar.gz", "shell": "tmp/nas-shell.tar.gz", "frp": "tmp/frpc.tar.gz"}
 
 
 def upload(sftp, local, remote):
