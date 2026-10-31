@@ -1,0 +1,27 @@
+# OCS（obs 文件/视频托管）——绿联 NAS 用镜像
+# 与卡片里跑的是同一份 src/obs/server.py，唯一区别是端口/目录走环境变量
+FROM python:3.11-slim
+
+ENV TZ=Asia/Shanghai \
+    PYTHONUNBUFFERED=1 \
+    PORT=8082 \
+    UPLOAD_DIR=/app/obs \
+    HLS_DIR=/app/hls \
+    LOG_DIR=/app/logs
+
+WORKDIR /app
+
+# ffmpeg/ffprobe 用于 HLS 切片与视频时长探测；git 便于容器内排查
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg curl tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY src/obs/requirements.txt /app/src/obs/requirements.txt
+RUN pip install --no-cache-dir -r /app/src/obs/requirements.txt
+
+COPY src/ /app/src/
+RUN mkdir -p /app/obs /app/hls /app/logs
+
+EXPOSE 8082
+
+CMD ["python", "-u", "src/obs/server.py"]

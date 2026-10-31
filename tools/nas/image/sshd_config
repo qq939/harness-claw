@@ -1,0 +1,26 @@
+Port 22
+AddressFamily inet
+ListenAddress 0.0.0.0
+
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+# 直接用密码/密钥登录 root：这是给宿主机自己用的运维入口，容器只发布在 NAS 的 LAN 端口上
+PermitRootLogin yes
+PasswordAuthentication yes
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+UsePAM no
+PrintMotd no
+PrintLastLog yes
+X11Forwarding no
+AllowTcpForwarding yes
+GatewayPorts no
+ClientAliveInterval 60
+ClientAliveCountMax 3
+MaxAuthTries 6
+MaxSessions 20
+
+Subsystem sftp internal-sftp

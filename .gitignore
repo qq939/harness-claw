@@ -49,3 +49,5 @@ config/claude/*.bak
 # ---- 本地临时目录 / 嵌套克隆（不纳入版本控制）----
 /tmp/
 /tools/obs-video/
+# ---- NAS 镜像构建产物 ----
+/tools/nas/image/docker

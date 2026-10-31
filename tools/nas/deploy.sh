@@ -41,14 +41,17 @@ docker run -d --name ocs --restart=always \
   ocs-nas:latest
 
 echo "== 4. SSH 运维容器（${SSH_PORT} -> 22）=="
+# --privileged --pid=host：容器里的 hostshell 用 nsenter 进宿主命名空间（等价 UGOS 的 root shell）
 docker rm -f nas-shell >/dev/null 2>&1 || true
 docker run -d --name nas-shell --restart=always \
+  --privileged --pid=host \
   --log-opt max-size=10m --log-opt max-file=3 \
   -p "${SSH_PORT}:22" \
   -e TZ=Asia/Shanghai \
   -v "$SHELL_DIR:/data" \
   -v "$SHELL_DIR/ssh:/root/.ssh" \
   -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /:/host \
   -v /mnt/dm-0:/mnt/dm-0 \
   -v /etc/localtime:/etc/localtime:ro \
   nas-shell:latest

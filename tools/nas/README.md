@@ -18,11 +18,23 @@
 # OCS
 http://192.168.0.201:8080/
 
-# SSH（Windows 上已配好别名 + 密钥，直接 ssh nas 即可）
+# SSH：容器 shell（里面有 docker CLI、/mnt/dm-0、宿主根目录在 /host）
 ssh nas
-ssh -p 2222 root@192.168.0.201          # 等价写法
+ssh nas "docker ps"
+
+# 真正进 NAS 宿主机（nsenter，等价 UGOS「远程调试」拿到的 root shell）
+ssh nas hostshell
+ssh nas hostshell        # 交互
+echo 'tail -1 /etc/crontabs/root' | ssh nas hostshell   # 一行式
+
+# 等价的显式写法
+ssh -p 2222 root@192.168.0.201
 # 密码登录：密码见 NAS 上 dockerImage/nas-shell/root_password
 ```
+
+`nas-shell` 用 `--privileged --pid=host` 起，所以容器里的 `hostshell` 能
+`nsenter -t 1 -m -u -i -n -p` 进宿主命名空间；容器重建不影响，宿主机密钥持久化在
+`dockerImage/nas-shell/hostkeys/`（不会每次重建都报 host key 变了）。
 
 ## 一开始为什么「所有端口都不通」
 
@@ -68,6 +80,10 @@ py -3 tools/nas/remote.py run "sh /mnt/dm-0/.ugreen_nas/137045/dockerImage/_impo
 
 ## 文件清单
 
+- `image/` — 两个镜像的构建文件
+  - `Dockerfile.ocs`：OCS（python:3.11-slim + ffmpeg，跑 `src/obs/server.py`）
+  - `Dockerfile` + `sshd_config` + `entrypoint.sh` + `hostshell.sh`：SSH 运维容器
+- `build_images.sh` — 一键构建两个镜像并导出 `tmp/*.tar.gz`
 - `deploy.sh` — 载入镜像 + 建目录 + 起两个容器（幂等，可重复跑）
 - `keepalive.sh` — 容器自愈（NAS 上 cron 每分钟调用）
 - `install_keepalive.sh` — 一次性把 keepalive 装进 crontab
