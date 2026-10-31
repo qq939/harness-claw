@@ -172,6 +172,7 @@ config/claude/            模型配置（settings.json / config.json + examples 
 agents/claude/            卡片镜像（sshd + Claude Code + watchdog）
 agents/ssh-gateway/       网页版 SSH 网关
 tools/                    挂进每张卡片的工具（hub / email / obs / github / localqwen …）
+tools/nas/                绿联 NAS（192.168.0.201）上的 OCS + SSH 运维容器部署脚本与踩坑记录
 workspaces/<卡片名>/       卡片工作目录（宿主机挂载，重建不丢）
 logs/<卡片名>/             卡片日志
 test_*.py                 端到端校验脚本（直接 `py -3 test_xxx.py` 跑）
