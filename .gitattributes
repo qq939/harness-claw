@@ -1,0 +1,2 @@
+# shell 脚本必须是 LF：CRLF 会让 #!/bin/sh\r 变成找不到解释器（watchdog 就是这么死的）
+*.sh text eol=lf

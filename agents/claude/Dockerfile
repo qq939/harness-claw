@@ -40,8 +40,10 @@ ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 # 看门狗：web app（8082）没响应就重跑 start.sh。CMD 里只拉一次 start.sh，偶发失败
 # 会导致卡片服务一直不起来（实测 19081-hub 重启后就是这样），所以要有自愈。
+# 注意：脚本必须 LF —— CRLF 会让 #!/bin/sh\r 变成"找不到解释器"，看门狗静默失效
+# （2026-10-26 踩过：22 张卡全都没起看门狗）。这里强制去掉 CR 再授权。
 COPY agents/claude/harness-watchdog.sh /usr/local/bin/harness-watchdog.sh
-RUN chmod +x /usr/local/bin/harness-watchdog.sh
+RUN sed -i 's/\r$//' /usr/local/bin/harness-watchdog.sh && chmod +x /usr/local/bin/harness-watchdog.sh
 
 USER agent
 WORKDIR /home/agent/.claude/workspace/project

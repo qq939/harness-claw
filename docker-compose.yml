@@ -62,6 +62,35 @@ services:
     networks:
       - openclaw-network
 
+  # ------------------------------------------------------------------
+  # harness-llm-gateway：全平台唯一的模型出口（唯一持有 API key 的容器）
+  #   - 卡片里的 Claude Code → http://harness-llm-gateway:8080/v1/messages
+  #   - 鉴权 token=agent（卡片里只有这个假 token，真 key 只在网关里）
+  #   - **不配 frpc 规则**：只走 docker 内网，公网访问不到
+  #   - 面板点 HARNESS 标题可切出口 profile，立刻生效，不用重建卡片
+  # ------------------------------------------------------------------
+  llm-gateway:
+    build:
+      # 独立构建上下文：镜像里只放 gateway.py，
+      # 真 key（providers.json）是运行时挂载进去的，绝不打进镜像层
+      context: ./config/llm-gateway
+      dockerfile: Dockerfile
+    image: harness-llm-gateway:latest
+    container_name: harness-llm-gateway
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - GATEWAY_TOKEN=agent
+      - GATEWAY_PORT=8080
+      - GATEWAY_PROVIDERS=/config/providers.json
+      - GATEWAY_STATE=/config/state.json
+      - GATEWAY_LOG=/logs/gateway.log
+    volumes:
+      - ./config/llm-gateway:/config
+      - ./logs:/logs
+    networks:
+      - openclaw-network
+
   agent-image-claude:
     build:
       context: .
