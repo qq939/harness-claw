@@ -28,8 +28,9 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
+import urllib.request
 from urllib.request import urlopen, Request
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 
 import docker
 from docker.types import LogConfig
@@ -958,8 +959,6 @@ def create_app(docker_client=None):
             log_config=log_config,
             network="hermit-claw_openclaw-network",
             extra_hosts=["host.docker.internal:host-gateway"],
-            mem_limit="16g",
-            memswap_limit="16g",
             shm_size="8g",
             device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])],
         )
@@ -1103,8 +1102,6 @@ def create_app(docker_client=None):
             log_config=log_config,
             network="hermit-claw_openclaw-network",
             extra_hosts=["host.docker.internal:host-gateway"],
-            mem_limit="16g",
-            memswap_limit="16g",
             shm_size="8g",
             device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])],
         )
@@ -1778,56 +1775,81 @@ def create_app(docker_client=None):
 
         return jsonify({"ok": ok, "uuid": track_uuid, "message": msg})
 
+    # ------------------------------------------------------------------
+    # 模型出口（harness-llm-gateway）：所有 API key 只在网关里，卡片不再持有。
+    # 面板点 HARNESS 标题可切出口 profile，网关立刻生效（卡片无需重启）。
+    # ------------------------------------------------------------------
+    GATEWAY_NAME = "harness-llm-gateway"
+    GATEWAY_URL = "http://%s:8080" % GATEWAY_NAME
+    GATEWAY_TOKEN = os.environ.get("GATEWAY_TOKEN", "agent")
+
+    def _gateway_request(path, method="GET", body=None):
+        """从 control 容器调网关（走 docker 内网，网关不对公网开放）。"""
+        url = GATEWAY_URL + path
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("x-api-key", GATEWAY_TOKEN)
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+                return r.status, (json.loads(raw) if raw.strip() else {})
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", errors="replace")
+            try:
+                return e.code, json.loads(raw)
+            except Exception:
+                return e.code, {"error": raw[:200]}
+        except Exception as e:
+            return 502, {"error": "网关不可达: %s" % e}
+
+    def _gateway_current():
+        """网关当前出口（profile + 实际模型 + 上游），供「查看模型」显示。"""
+        code, data = _gateway_request("/health")
+        if code != 200:
+            return {"ok": False, "error": data.get("error") or "网关不可达"}
+        return {
+            "ok": True,
+            "name": GATEWAY_NAME,
+            "profile": data.get("profile"),
+            "model": data.get("model"),
+            "base_url": data.get("base_url"),
+        }
+    @app.get("/api/llm-gateway/profiles")
+    def api_gateway_profiles():
+        code, data = _gateway_request("/admin/profiles")
+        if code != 200:
+            return jsonify({"error": data.get("error") or "网关不可达", "gateway": GATEWAY_NAME}), code
+        return jsonify(data)
+
+    @app.post("/api/llm-gateway/profile")
+    def api_gateway_switch_profile():
+        body = request.get_json(silent=True) or {}
+        profile = (body.get("profile") or "").strip()
+        if not profile:
+            return jsonify({"error": "profile 不能为空"}), 400
+        code, data = _gateway_request("/admin/profile", "POST", {"profile": profile})
+        if code != 200:
+            return jsonify({"error": data.get("error") or "切换失败"}), code
+        return jsonify(data)
+
     @app.post("/api/agents/<path:name>/switch-model")
     def api_switch_model(name):
-        """切换容器模型：写入选定模板的 settings.json 和 config.json，保留 hooks，重启容器"""
+        """卡片已不再持有 API key，模型统一由 harness-llm-gateway 出口。
+
+        2026-10-25 起这个接口不再改卡片配置（改也没用：卡片只有网关地址+假 token），
+        统一改成切网关出口，立刻对所有卡片生效。
+        """
         data = request.get_json(silent=True) or {}
         profile = (data.get("profile") or "").strip()
         if not profile:
             return jsonify({"error": "Missing profile name"}), 400
-        try:
-            container = _require_managed(name)
-        except Exception:
-            return jsonify({"error": "Container not found"}), 404
-
-        config_dir = os.path.join(app.config.get("CONFIG_ROOT", "/config"), "claude")
-        settings_variant = os.path.join(config_dir, f"settings.json.{profile}")
-        config_variant = os.path.join(config_dir, f"config.json.{profile}")
-
-        if not os.path.isfile(settings_variant) or not os.path.isfile(config_variant):
-            return jsonify({"error": f"Profile '{profile}' variants not found"}), 404
-
-        try:
-            with open(settings_variant, "r", encoding="utf-8") as f:
-                settings_content = f.read()
-            with open(config_variant, "r", encoding="utf-8") as f:
-                config_content = f.read()
-        except OSError as e:
-            return jsonify({"error": str(e)}), 500
-
-        # 替换 hooks 中的 $HOSTNAME 为实际容器名
-        settings_content = settings_content.replace("$HOSTNAME", name)
-
-        # 写入容器
-        def _write_via_exec(dst_path, content):
-            encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-            ec = container.exec_run(
-                ["/bin/sh", "-lc", f"echo '{encoded}' | base64 -d > '{dst_path}'"],
-                user=AGENT_RUNTIME_USER)
-            return ec.exit_code == 0
-
-        if not _write_via_exec("/home/agent/.claude/settings.json", settings_content):
-            return jsonify({"error": "Failed to write settings.json"}), 500
-        if not _write_via_exec("/home/agent/.claude/config.json", config_content):
-            return jsonify({"error": "Failed to write config.json"}), 500
-
-        # 重启容器使配置生效
-        try:
-            container.restart()
-        except Exception as e:
-            return jsonify({"ok": True, "profile": profile, "warning": f"Files written but restart failed: {e}"})
-
-        return jsonify({"ok": True, "profile": profile, "restarted": True})
+        code, gw = _gateway_request("/admin/profile", "POST", {"profile": profile})
+        if code != 200:
+            return jsonify({"error": gw.get("error") or "切换失败"}), code
+        return jsonify({"ok": True, "profile": gw.get("profile"), "model": gw.get("model"),
+                        "gateway": GATEWAY_NAME, "restarted": False,
+                        "note": "卡片不再持有 key，模型由 harness-llm-gateway 统一出口，已立刻生效"})
 
     # ------------------------------------------------------------------
     # 模型读取（纯只读，不修改任何容器）
@@ -2083,6 +2105,8 @@ def create_app(docker_client=None):
             "env_base_url": env_base_url,
             "config_base_url": config_base_url,
             "primary_model": primary_model,
+        # 网关当前实际出口（卡片只持有网关地址+假 token，真正用哪个模型由网关决定）
+        "gateway": _gateway_current(),
             "is_default_config": bool(matched and matched["is_default"]),
             "default_model_id": (default_profile or {}).get("model_id", ""),
             "default_base_url": (default_profile or {}).get("base_url", ""),
@@ -3023,6 +3047,15 @@ def create_app(docker_client=None):
       }}
 
       let profileData = {{ profiles: [], active: "" }};
+      let gatewayData = {{ current: "", items: [] }};
+
+      async function loadGatewayProfiles() {{
+        try {{
+          const res = await fetch("/api/llm-gateway/profiles", {{ cache: "no-store" }});
+          const data = await res.json();
+          gatewayData = data || gatewayData;
+        }} catch(err) {{}}
+      }}
 
       function showProfilePopup() {{
         // 移除已有 popup
@@ -3036,32 +3069,43 @@ def create_app(docker_client=None):
         popup.style.top = (rect.bottom + 4) + "px";
         popup.style.left = rect.left + "px";
 
-        if (profileData.profiles.length === 0) {{
+        // 2026-10-25：模型统一由 harness-llm-gateway 出口，这里点一下就换出口，立刻生效
+        const head = document.createElement("div");
+        head.style.cssText = "padding:6px 10px;color:#9ca3af;font-size:11px;border-bottom:1px solid #232a36;";
+        head.textContent = "模型出口（harness-llm-gateway）· 切换立刻对所有卡片生效";
+        popup.appendChild(head);
+
+        const items = gatewayData.items || [];
+        if (items.length === 0) {{
           const d = document.createElement("div");
-          d.textContent = "无配置模板";
+          d.textContent = "网关未就绪（看容器 harness-llm-gateway）";
           d.style.cursor = "default";
           d.onclick = (e) => e.stopPropagation();
           popup.appendChild(d);
         }} else {{
-          for (const p of profileData.profiles) {{
+          for (const it of items) {{
             const d = document.createElement("div");
-            d.textContent = p + (p === profileData.active ? " [当前]" : "");
-            if (p === profileData.active) d.className = "active";
+            d.textContent = it.name + (it.active ? " [当前]" : "") + (it.model ? "  ·  " + it.model : "");
+            if (it.active) d.className = "active";
             d.onclick = async (e) => {{
               e.stopPropagation();
-              popup.remove();
-              if (p === profileData.active) return;
-              const confirmed = confirm(`切换配置文件为 "${{p}}"，将替换 config.json 和 settings.json，确定？`);
+              if (it.active) return;
+              const confirmed = confirm(`把模型出口切到 "${{it.name}}"（${{it.model || ''}}）？所有卡片立刻生效。`);
               if (!confirmed) return;
               try {{
-                const res = await fetch("/api/config/switch-profile", {{
+                const res = await fetch("/api/llm-gateway/profile", {{
                   method: "POST",
                   headers: {{ "Content-Type": "application/json" }},
-                  body: JSON.stringify({{ profile: p }})
+                  body: JSON.stringify({{ profile: it.name }})
                 }});
                 const data = await res.json();
-                if (data.ok) {{ location.reload(); }}
-                else {{ alert("切换失败: " + (data.error || "未知错误")); }}
+                if (data.ok) {{
+                  alert("已切换出口：" + data.profile + "（" + (data.model || "") + "）");
+                  popup.remove();
+                  await loadGatewayProfiles();
+                }} else {{
+                  alert("切换失败: " + (data.error || "未知错误"));
+                }}
               }} catch(err) {{ alert("请求失败: " + err.message); }}
             }};
             popup.appendChild(d);
@@ -3121,7 +3165,7 @@ def create_app(docker_client=None):
           <div class="card-body">
           <div class="actions">
             <button data-action="ssh">SSH终端</button>
-            <button data-action="switch-model">切换模型</button>
+            <button data-action="switch-model" title="查看这张卡片当前用的模型（模型由 harness-llm-gateway 统一出口，点左上角 HARNESS 标题可切换）">查看模型</button>
             <button data-action="refresh">刷新日志</button>
             <button data-action="download">下载日志</button>
             <button data-action="recreate">重建</button>
@@ -3237,7 +3281,7 @@ def create_app(docker_client=None):
             const r = await fetch(`/api/agents/${{encodeURIComponent(item.container_name)}}/current-model`);
             modelInfo = await r.json();
           }} catch(err) {{}}
-          btn.textContent = "切换模型";
+          btn.textContent = "查看模型";
           if (!modelInfo) modelInfo = {{}};
           const currentProfile = modelInfo.profile || "";
 
@@ -3265,9 +3309,17 @@ def create_app(docker_client=None):
           }};
           const head = document.createElement("div");
           head.className = "head";
-          head.textContent = (modelInfo.in_sync === false ? "实际生效：" : "当前模型：")
-            + (modelInfo.model_id || "未知（端点不在现有 profile 中）");
+          const gw = modelInfo.gateway || {{}};
+          head.textContent = gw.ok
+            ? ("当前出口模型：" + (gw.model || "未知"))
+            : (modelInfo.in_sync === false ? "实际生效：" : "当前模型：")
+              + (modelInfo.model_id || "未知（端点不在现有 profile 中）");
           infoBox.appendChild(head);
+          if (gw.ok) {{
+            addRow("出口 profile", gw.profile || "未知");
+            addRow("上游端点", gw.base_url || "未知");
+            addRow("网关", gw.name || "harness-llm-gateway");
+          }}
           addRow("Provider", modelInfo.provider_name || "未知");
           addRow("生效端点", modelInfo.base_url || "未知");
           addRow("匹配 profile", modelInfo.profile_label || "无匹配（自定义或旧配置）");
@@ -3298,35 +3350,18 @@ def create_app(docker_client=None):
             d.style.cursor = "default";
             popup.appendChild(d);
           }} else {{
+            // 2026-10-25：卡片不再持有 API key，模型由 harness-llm-gateway 统一出口，
+            // 这里只读展示（在面板点 HARNESS 标题可以切出口，切换立刻对所有卡片生效）。
+            const d = document.createElement("div");
+            d.className = "model-hint";
+            d.textContent = "模型由 harness-llm-gateway 统一出口（点左上角 HARNESS 标题可切换，立刻生效）";
+            popup.appendChild(d);
             for (const p of profiles) {{
-              const d = document.createElement("div");
-              d.textContent = p + (p === currentProfile ? " [当前]" : "");
-              if (p === currentProfile) d.className = "active";
-              d.onclick = async (e2) => {{
-                e2.stopPropagation();
-                popup.remove();
-                if (p === currentProfile) return;
-                const confirmed = confirm(`切换 "${{item.container_name}}" 模型为 "${{p}}" 并重启容器，确定？`);
-                if (!confirmed) return;
-                logBox.textContent += `\n[切换模型 -> ${{p}}] 执行中...\n`;
-                try {{
-                  const r = await fetch(`/api/agents/${{encodeURIComponent(item.container_name)}}/switch-model`, {{
-                    method: "POST",
-                    headers: {{ "Content-Type": "application/json" }},
-                    body: JSON.stringify({{ profile: p }})
-                  }});
-                  const data = await r.json();
-                  if (data.ok) {{
-                    logBox.textContent += `[完成] 已切换为 ${{p}}，容器已重启\n`;
-                  }} else {{
-                    logBox.textContent += `ERROR: ${{data.error || "未知错误"}}\n`;
-                  }}
-                }} catch(err) {{
-                  logBox.textContent += `ERROR: ${{err.message}}\n`;
-                }}
-                await refreshCards();
-              }};
-              popup.appendChild(d);
+              const it = document.createElement("div");
+              it.textContent = p + (p === currentProfile ? " [出口 profile]" : "");
+              it.style.cursor = "default";
+              if (p === currentProfile) it.className = "active";
+              popup.appendChild(it);
             }}
           }}
 
@@ -3808,6 +3843,7 @@ def create_app(docker_client=None):
       (async () => {{
         await loadTypes();
         await loadThinkingLevel();
+        await loadGatewayProfiles();
         try {{
           const res = await fetch("/api/config/profiles", {{ cache: "no-store" }});
           profileData = await res.json();
