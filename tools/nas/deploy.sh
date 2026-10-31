@@ -27,6 +27,10 @@ mkdir -p "$OCS/obs" "$OCS/hls" "$OCS/logs" "$SHELL_DIR/ssh"
 chmod 777 "$OCS" "$OCS/obs" "$OCS/hls" "$OCS/logs"
 chmod 700 "$SHELL_DIR/ssh"
 
+# 内容目录的软链接：/ocs（宿主根）与存储卷用户目录根（文件管理器可见）
+ln -sfn "$OCS" /ocs
+ln -sfn "$OCS" /mnt/dm-0/.ugreen_nas/137045/ocs
+
 echo "== 3. OCS 容器（${OCS_PORT} -> 8082，另挂 ${OCS_PORT_ALT}）=="
 docker rm -f ocs >/dev/null 2>&1 || true
 docker run -d --name ocs --restart=always \
