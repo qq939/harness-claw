@@ -1,8 +1,7 @@
 #!/bin/sh
 # 绿联 NAS（192.168.0.201）部署：ocs（文件/视频托管）+ nas-shell（SSH 运维容器）
 # 位置：/mnt/dm-0/.ugreen_nas/137045/dockerImage/{ocs,nas-shell}
-# 说明：UGOS 没有 systemctl、没有 docker compose；自启动靠 --restart=always + dockerd 随系统起，
-#       再用 keepalive.sh（cron 每分钟）兜底，因为 UGOS 的 dockerd 不会在容器自己退出后按策略重启。
+# 说明：UGOS 没有 systemctl、没有 docker compose；自启动靠 --restart=always + dockerd 随系统起。
 set -e
 
 BASE=/mnt/dm-0/.ugreen_nas/137045/dockerImage

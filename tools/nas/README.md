@@ -46,12 +46,11 @@ ssh -p 2222 root@192.168.0.201
 tailscale set --accept-routes=false
 ```
 
-## 自启动（UGOS 的坑）
+## 自启动
 
-- UGOS 没有 `systemctl`，`dockerd` 由 `/etc/init.d/dockerd` 拉起；容器加 `--restart=always`
-  **只在 dockerd 重启时生效**——容器自己崩掉 / 被 `docker kill` 后，UGOS 的 dockerd 不会按策略重启它。
-- 所以额外加了兜底：`keepalive.sh` + root crontab 每分钟检查一次，没跑就 `docker start`（实测 ~25s 恢复）。
-  停用：在 `dockerImage/` 下建 `.no-keepalive`。
+- UGOS 没有 `systemctl`，`dockerd` 由 `/etc/init.d/dockerd` 拉起；容器统一加 `--restart=always`，
+  dockerd 随系统起时会把它们带回来（实测重启 dockerd 后两个容器都自动恢复）。
+- 不再加额外的 cron 看门狗：NAS 上 dockerd 很稳，需要时手动 `docker start ocs nas-shell` 即可。
 
 ## 重新部署 / 升级镜像（NAS 上不了 GitHub 和 Docker Hub）
 
@@ -85,8 +84,6 @@ py -3 tools/nas/remote.py run "sh /mnt/dm-0/.ugreen_nas/137045/dockerImage/_impo
   - `Dockerfile` + `sshd_config` + `entrypoint.sh` + `hostshell.sh`：SSH 运维容器
 - `build_images.sh` — 一键构建两个镜像并导出 `tmp/*.tar.gz`
 - `deploy.sh` — 载入镜像 + 建目录 + 起两个容器（幂等，可重复跑）
-- `keepalive.sh` — 容器自愈（NAS 上 cron 每分钟调用）
-- `install_keepalive.sh` — 一次性把 keepalive 装进 crontab
 - `remote.py` — 走 922 的 SSH 远程执行 / 传文件（paramiko）
 - `upload_images.py` — 批量传镜像 tar.gz
 - `rev-tunnel.sh` — 可选：把 NAS 的这个容器反向打到跳板机（不用 frp）
