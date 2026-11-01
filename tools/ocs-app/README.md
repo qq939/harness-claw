@@ -5,7 +5,16 @@
 ## 功能
 
 - Chrome 内核（系统 WebView），全屏无地址栏，默认打开 `https://ocs.dimond.top`
-- 左上角有一个很淡的小齿轮：点开可切换服务器（预设 ocs.dimond.top / oas.dimond.top / NAS1 / NAS2:5080，或手动输入），记住选择
+- 左上角有一个很淡的小齿轮：点开切换服务器，列表固定为（行高 18dp，好点）：
+  ```
+  http://oas.dimond.top      （NAS2，站点名 oas）
+  http://obs.dimond.top
+  http://ocs.dimond.top      （19082）
+  http://192.168.0.201       （NAS1 局域网）
+  http://192.168.0.202       （NAS2 局域网）
+  ```
+  另有一个「手动输入…」按钮可填任意地址；选择会记住。
+  这些站是 http 会 301 到 https，上传时 App 会手动跟随一次重定向（PUT 不会被 HttpURLConnection 自动跟随）。
 - **分享目标**：`ACTION_SEND` / `ACTION_SEND_MULTIPLE`，每种常见类型单独声明
   （`image/*`、`video/*`、`audio/*`、`text/*`、`application/*`、`*/*`，各 2 个 action 共 12 个 filter）。
   只写 `*/*` 时小米澎湃OS / 部分 ROM 的分享面板匹配不到，v1.1 起改成显式类型。
@@ -15,7 +24,7 @@
 - 网页里的下载交给系统 DownloadManager
 - 允许明文 http（局域网 NAS 用），返回键 = 网页后退
 
-当前版本：`versionName 1.1`（versionCode 2）
+当前版本：`versionName 1.2`（versionCode 3）
 
 ## 构建
 

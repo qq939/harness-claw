@@ -16,6 +16,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.text.InputType;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -24,9 +25,11 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.BaseAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ListAdapter;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -44,26 +47,22 @@ import java.util.List;
  * ocs —— 一个只有 OCS 页面的壳：
  *   - 没有地址栏，启动即打开 OCS 页面（WebView，Chrome 内核）
  *   - 接收别的 App「分享」过来的文件（单个/多个），批量 PUT 到 OCS
- *   - 左上角很小的齿轮用来改服务器地址（长按/点一下）
+ *   - 左上角很小的齿轮用来切服务器
  */
 public class MainActivity extends Activity {
 
     private static final String PREFS = "ocs";
     private static final String KEY_URL = "base_url";
-    private static final String DEFAULT_URL = "https://ocs.dimond.top";
+    private static final String DEFAULT_URL = "http://ocs.dimond.top";
     private static final String UPLOAD_TOKEN = "agent";
 
-    private static final String[] PRESET_LABELS = {
-            "ocs.dimond.top（公网）",
-            "oas.dimond.top（NAS2 域名）",
-            "NAS1 192.168.0.201（局域网）",
-            "NAS2 8.130.124.108:5080（公网）",
-    };
-    private static final String[] PRESET_URLS = {
-            "https://ocs.dimond.top",
-            "https://oas.dimond.top",
+    /** 服务器切换列表（顺序即展示顺序） */
+    private static final String[] SERVERS = {
+            "http://oas.dimond.top",
+            "http://obs.dimond.top",
+            "http://ocs.dimond.top",
             "http://192.168.0.201",
-            "http://8.130.124.108:5080",
+            "http://192.168.0.202",
     };
 
     private static final int REQ_FILE = 1001;
@@ -92,7 +91,7 @@ public class MainActivity extends Activity {
         configureWebView(web);
         root.addView(web);
 
-        // 左上角的小齿轮：改服务器地址（透明一点，不挡页面）
+        // 左上角的小齿轮：切服务器（很淡，不挡页面）
         TextView gear = new TextView(this);
         gear.setText("⚙");
         gear.setTextSize(16);
@@ -154,7 +153,7 @@ public class MainActivity extends Activity {
         s.setBuiltInZoomControls(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        s.setUserAgentString(s.getUserAgentString() + " ocsApp/1.0");
+        s.setUserAgentString(s.getUserAgentString() + " ocsApp/1.2");
 
         w.setWebViewClient(new WebViewClient() {
             @Override
@@ -209,7 +208,6 @@ public class MainActivity extends Activity {
     private boolean openExternalIfNeeded(String url) {
         if (url == null) return false;
         if (url.startsWith("http://") || url.startsWith("https://")) {
-            if (url.contains("target=_blank")) return false;
             return false;
         }
         try {
@@ -258,42 +256,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void uploadText(final String text) {
-        final String base = baseUrl();
-        showOverlay("上传文本…", 0);
-        new Thread(() -> {
-            String name = "share-" + System.currentTimeMillis() + ".txt";
-            try {
-                byte[] data = text.getBytes("UTF-8");
-                String endpoint = base.replaceAll("/+$", "") + "/" + Uri.encode(name)
-                        + "?token=" + UPLOAD_TOKEN;
-                HttpURLConnection conn = (HttpURLConnection) new URL(endpoint).openConnection();
-                conn.setRequestMethod("PUT");
-                conn.setDoOutput(true);
-                conn.setConnectTimeout(15000);
-                conn.setReadTimeout(120000);
-                conn.setFixedLengthStreamingMode(data.length);
-                conn.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
-                try (OutputStream out = conn.getOutputStream()) {
-                    out.write(data);
-                }
-                int code = conn.getResponseCode();
-                conn.disconnect();
-                final boolean ok = (code == 201 || code == 200);
-                ui.post(() -> {
-                    hideOverlay();
-                    toast(ok ? "已上传：" + name : "上传失败 HTTP " + code);
-                    if (ok && web != null) web.reload();
-                });
-            } catch (Exception e) {
-                ui.post(() -> {
-                    hideOverlay();
-                    toast("上传失败：" + e.getMessage());
-                });
-            }
-        }).start();
-    }
-
     private List<Uri> urisFromIntent(Intent it) {
         ArrayList<Uri> out = new ArrayList<>();
         if (it == null) return out;
@@ -339,58 +301,144 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** PUT 结果（含重定向信息） */
+    private static final class PutResult {
+        int code;
+        String location;
+        String body = "";
+    }
+
+    private PutResult doPut(Uri uri, String endpoint, long size, String label) throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) new URL(endpoint).openConnection();
+        PutResult res = new PutResult();
+        try {
+            conn.setRequestMethod("PUT");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(300000);
+            conn.setInstanceFollowRedirects(false);
+            conn.setRequestProperty("Content-Type", guessMime(label));
+            if (size > 0) {
+                conn.setFixedLengthStreamingMode(size);
+            } else {
+                conn.setChunkedStreamingMode(64 * 1024);
+            }
+            try (InputStream in = new BufferedInputStream(getContentResolver().openInputStream(uri));
+                 OutputStream out = conn.getOutputStream()) {
+                byte[] buf = new byte[64 * 1024];
+                long sent = 0;
+                long nextReport = 0;
+                int lastPct = -1;
+                int r;
+                while ((r = in.read(buf)) > 0) {
+                    out.write(buf, 0, r);
+                    sent += r;
+                    final int pct = size > 0 ? (int) (sent * 100 / size) : -1;
+                    boolean due = (pct >= 0) ? (pct != lastPct) : (sent >= nextReport);
+                    if (!due) continue;
+                    lastPct = pct;
+                    if (pct < 0) nextReport = sent + 1024 * 1024;
+                    final int shown = pct >= 0 ? pct : 0;
+                    final String text = label + (pct >= 0 ? "（" + pct + "%）" : "");
+                    ui.post(() -> showOverlay(text, shown));
+                }
+            }
+            res.code = conn.getResponseCode();
+            res.location = conn.getHeaderField("Location");
+            if (res.code >= 400) {
+                try (InputStream es = conn.getErrorStream()) {
+                    if (es != null) {
+                        byte[] b = new byte[512];
+                        int n = es.read(b);
+                        if (n > 0) res.body = new String(b, 0, n, "UTF-8");
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        } finally {
+            conn.disconnect();
+        }
+        return res;
+    }
+
+    private static boolean isRedirect(int code) {
+        return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
+    }
+
+    private static String resolve(String base, String location) {
+        if (location == null) return base;
+        try {
+            return new URL(new URL(base), location).toString();
+        } catch (Exception e) {
+            return location;
+        }
+    }
+
     private void putFile(Uri uri, String base, int idx, int total, String name) throws IOException {
         String endpoint = base.replaceAll("/+$", "") + "/" + Uri.encode(name)
                 + "?token=" + UPLOAD_TOKEN;
         long size = sizeOf(uri);
-        HttpURLConnection conn = (HttpURLConnection) new URL(endpoint).openConnection();
-        conn.setRequestMethod("PUT");
-        conn.setDoOutput(true);
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(300000);
-        conn.setRequestProperty("Content-Type", guessMime(name));
-        if (size > 0) {
-            conn.setFixedLengthStreamingMode(size);
-        } else {
-            conn.setChunkedStreamingMode(64 * 1024);
+        String label = "上传 " + idx + "/" + total + "：" + name;
+        PutResult r = doPut(uri, endpoint, size, label);
+        // 站点常把 http 301 到 https；PUT 不会被 HttpURLConnection 自动跟随，这里手动跟一次
+        if (isRedirect(r.code) && r.location != null) {
+            endpoint = resolve(endpoint, r.location);
+            r = doPut(uri, endpoint, size, label);
         }
-        try (InputStream in = new BufferedInputStream(getContentResolver().openInputStream(uri));
-             OutputStream out = conn.getOutputStream()) {
-            byte[] buf = new byte[64 * 1024];
-            long sent = 0;
-            long nextReport = 0;
-            int lastPct = -1;
-            int r;
-            while ((r = in.read(buf)) > 0) {
-                out.write(buf, 0, r);
-                sent += r;
-                final int pct = size > 0 ? (int) (sent * 100 / size) : -1;
-                // 进度只在百分比变化（大小未知时每 1MB）刷新，避免大文件把消息队列刷爆
-                boolean due = (pct >= 0) ? (pct != lastPct) : (sent >= nextReport);
-                if (!due) continue;
-                lastPct = pct;
-                if (pct < 0) nextReport = sent + 1024 * 1024;
-                final int shown = pct >= 0 ? pct : 0;
-                final String label = "上传 " + idx + "/" + total + "：" + name
-                        + (pct >= 0 ? "（" + pct + "%）" : "");
-                ui.post(() -> showOverlay(label, shown));
-            }
+        if (r.code != 201 && r.code != 200) {
+            throw new IOException("HTTP " + r.code + (r.body.isEmpty() ? "" : " " + r.body));
         }
-        int code = conn.getResponseCode();
-        if (code != 201 && code != 200) {
-            String body = "";
-            try (InputStream es = conn.getErrorStream()) {
-                if (es != null) {
-                    byte[] b = new byte[512];
-                    int n = es.read(b);
-                    if (n > 0) body = new String(b, 0, n, "UTF-8");
+    }
+
+    private void uploadText(final String text) {
+        final String base = baseUrl();
+        showOverlay("上传文本…", 0);
+        new Thread(() -> {
+            String name = "share-" + System.currentTimeMillis() + ".txt";
+            String endpoint = base.replaceAll("/+$", "") + "/" + Uri.encode(name)
+                    + "?token=" + UPLOAD_TOKEN;
+            try {
+                byte[] data = text.getBytes("UTF-8");
+                PutResult r = putBytes(data, endpoint, name);
+                if (isRedirect(r.code) && r.location != null) {
+                    r = putBytes(data, resolve(endpoint, r.location), name);
                 }
-            } catch (Exception ignored) {
+                final boolean ok = (r.code == 201 || r.code == 200);
+                final int code = r.code;
+                ui.post(() -> {
+                    hideOverlay();
+                    toast(ok ? "已上传：" + name : "上传失败 HTTP " + code);
+                    if (ok && web != null) web.reload();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    hideOverlay();
+                    toast("上传失败：" + e.getMessage());
+                });
             }
+        }).start();
+    }
+
+    private PutResult putBytes(byte[] data, String endpoint, String name) throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) new URL(endpoint).openConnection();
+        PutResult res = new PutResult();
+        try {
+            conn.setRequestMethod("PUT");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(120000);
+            conn.setInstanceFollowRedirects(false);
+            conn.setFixedLengthStreamingMode(data.length);
+            conn.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+            try (OutputStream out = conn.getOutputStream()) {
+                out.write(data);
+            }
+            res.code = conn.getResponseCode();
+            res.location = conn.getHeaderField("Location");
+        } finally {
             conn.disconnect();
-            throw new IOException("HTTP " + code + (body.isEmpty() ? "" : " " + body));
         }
-        conn.disconnect();
+        return res;
     }
 
     private String displayName(Uri uri) {
@@ -498,19 +546,41 @@ public class MainActivity extends Activity {
         if (web != null) web.loadUrl(url);
     }
 
+    /** 切换列表：5 个固定地址，行高加大方便点 */
     private void showServerDialog() {
-        String[] items = new String[PRESET_LABELS.length + 1];
-        System.arraycopy(PRESET_LABELS, 0, items, 0, PRESET_LABELS.length);
-        items[PRESET_LABELS.length] = "手动输入…";
+        ListAdapter adapter = new BaseAdapter() {
+            @Override
+            public int getCount() {
+                return SERVERS.length;
+            }
+
+            @Override
+            public Object getItem(int i) {
+                return SERVERS[i];
+            }
+
+            @Override
+            public long getItemId(int i) {
+                return i;
+            }
+
+            @Override
+            public View getView(int i, View convertView, ViewGroup parent) {
+                TextView tv = new TextView(MainActivity.this);
+                tv.setText(SERVERS[i]);
+                tv.setTextSize(16);
+                tv.setTextColor(SERVERS[i].equals(baseUrl()) ? 0xFF2F7CF6 : 0xFF222222);
+                tv.setPadding(dp(20), dp(18), dp(20), dp(18));
+                TypedValue out = new TypedValue();
+                getTheme().resolveAttribute(android.R.attr.selectableItemBackground, out, true);
+                tv.setBackgroundResource(out.resourceId);
+                return tv;
+            }
+        };
         new AlertDialog.Builder(this)
-                .setTitle("OCS 服务器：" + baseUrl())
-                .setItems(items, (d, which) -> {
-                    if (which < PRESET_URLS.length) {
-                        saveBaseUrl(PRESET_URLS[which]);
-                    } else {
-                        showManualInput();
-                    }
-                })
+                .setTitle("切换服务器")
+                .setAdapter(adapter, (d, which) -> saveBaseUrl(SERVERS[which]))
+                .setNeutralButton("手动输入…", (d, w) -> showManualInput())
                 .setNegativeButton("取消", null)
                 .show();
     }
