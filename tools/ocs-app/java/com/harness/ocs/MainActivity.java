@@ -55,11 +55,13 @@ public class MainActivity extends Activity {
 
     private static final String[] PRESET_LABELS = {
             "ocs.dimond.top（公网）",
+            "oas.dimond.top（NAS2 域名）",
             "NAS1 192.168.0.201（局域网）",
             "NAS2 8.130.124.108:5080（公网）",
     };
     private static final String[] PRESET_URLS = {
             "https://ocs.dimond.top",
+            "https://oas.dimond.top",
             "http://192.168.0.201",
             "http://8.130.124.108:5080",
     };
@@ -243,8 +245,53 @@ public class MainActivity extends Activity {
 
     private void handleIntent(Intent it) {
         List<Uri> uris = urisFromIntent(it);
-        if (uris.isEmpty()) return;
-        uploadAll(uris);
+        if (!uris.isEmpty()) {
+            uploadAll(uris);
+            return;
+        }
+        // 只分享了文字（链接/纯文本）：落成一个 .txt 再上传
+        if (it != null && Intent.ACTION_SEND.equals(it.getAction())) {
+            CharSequence text = it.getCharSequenceExtra(Intent.EXTRA_TEXT);
+            if (text != null && text.length() > 0) {
+                uploadText(text.toString());
+            }
+        }
+    }
+
+    private void uploadText(final String text) {
+        final String base = baseUrl();
+        showOverlay("上传文本…", 0);
+        new Thread(() -> {
+            String name = "share-" + System.currentTimeMillis() + ".txt";
+            try {
+                byte[] data = text.getBytes("UTF-8");
+                String endpoint = base.replaceAll("/+$", "") + "/" + Uri.encode(name)
+                        + "?token=" + UPLOAD_TOKEN;
+                HttpURLConnection conn = (HttpURLConnection) new URL(endpoint).openConnection();
+                conn.setRequestMethod("PUT");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(120000);
+                conn.setFixedLengthStreamingMode(data.length);
+                conn.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                try (OutputStream out = conn.getOutputStream()) {
+                    out.write(data);
+                }
+                int code = conn.getResponseCode();
+                conn.disconnect();
+                final boolean ok = (code == 201 || code == 200);
+                ui.post(() -> {
+                    hideOverlay();
+                    toast(ok ? "已上传：" + name : "上传失败 HTTP " + code);
+                    if (ok && web != null) web.reload();
+                });
+            } catch (Exception e) {
+                ui.post(() -> {
+                    hideOverlay();
+                    toast("上传失败：" + e.getMessage());
+                });
+            }
+        }).start();
     }
 
     private List<Uri> urisFromIntent(Intent it) {

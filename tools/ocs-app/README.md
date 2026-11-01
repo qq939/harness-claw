@@ -5,11 +5,17 @@
 ## 功能
 
 - Chrome 内核（系统 WebView），全屏无地址栏，默认打开 `https://ocs.dimond.top`
-- 左上角有一个很淡的小齿轮：点开可切换服务器（预设 ocs.dimond.top / NAS1 / NAS2，或手动输入），记住选择
-- 接收 `ACTION_SEND` / `ACTION_SEND_MULTIPLE`（`*/*`）：支持单个、多个文件，逐个 `PUT <server>/<文件名>?token=agent`，底部显示进度条，完成后自动刷新页面
+- 左上角有一个很淡的小齿轮：点开可切换服务器（预设 ocs.dimond.top / oas.dimond.top / NAS1 / NAS2:5080，或手动输入），记住选择
+- **分享目标**：`ACTION_SEND` / `ACTION_SEND_MULTIPLE`，每种常见类型单独声明
+  （`image/*`、`video/*`、`audio/*`、`text/*`、`application/*`、`*/*`，各 2 个 action 共 12 个 filter）。
+  只写 `*/*` 时小米澎湃OS / 部分 ROM 的分享面板匹配不到，v1.1 起改成显式类型。
+- 收到文件后逐个 `PUT <server>/<文件名>?token=agent`，底部进度条 + 完成后刷新页面；
+  只分享文字（链接/纯文本）时落成 `share-<时间戳>.txt` 上传
 - 网页里的「选择文件 / 上传文件夹」也能用（`onShowFileChooser` + 多选）
 - 网页里的下载交给系统 DownloadManager
 - 允许明文 http（局域网 NAS 用），返回键 = 网页后退
+
+当前版本：`versionName 1.1`（versionCode 2）
 
 ## 构建
 

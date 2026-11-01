@@ -30,6 +30,7 @@ fi
 # 对外地址：有公网映射（frp/反代）时用 PUBLIC_BASE，没有就用局域网地址
 PUBLIC_BASE="${PUBLIC_BASE:-$LAN_URL}"
 PUBLIC_BASE="${PUBLIC_BASE%/}"
+SITE_NAME="${SITE_NAME:-文件托管服务}"
 
 echo "== 1. 载入镜像 =="
 docker load -i "$IMPORT/ocs-nas.tar.gz" | tail -2
@@ -48,7 +49,7 @@ ln -sfn "$OCS/obs" /obs
 ln -sfn "$OCS/obs" /mnt/dm-0/.ugreen_nas/137045/obs
 
 echo "== 3. OCS 容器（${OCS_PORT} -> 8082，另挂 ${OCS_PORT_ALT}）=="
-echo "   对外地址: $PUBLIC_BASE   局域网: $LAN_URL"
+echo "   对外地址: $PUBLIC_BASE   局域网: $LAN_URL   站点名: $SITE_NAME"
 docker rm -f ocs >/dev/null 2>&1 || true
 docker run -d --name ocs --restart=always \
   --log-opt max-size=10m --log-opt max-file=3 \
@@ -62,6 +63,7 @@ docker run -d --name ocs --restart=always \
   -e URL_HEAD="$PUBLIC_BASE" \
   -e OCS_LOCAL_BASE="$LAN_URL" \
   -e OCS_FALLBACK_BASE="$PUBLIC_BASE" \
+  -e SITE_NAME="$SITE_NAME" \
   -v "$OCS:/data" \
   -v /etc/localtime:/etc/localtime:ro \
   ocs-nas:latest

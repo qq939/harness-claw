@@ -10,6 +10,11 @@
 | | | `nas-shell` | 2222 → 22 | `nas-shell/` |
 | | | `frp`（frpc v0.65.0，host 网络） | 本机 **80** → 阿里云 **5080** | `frp/frpc.ini`（挂到容器 `/etc/frp`） |
 
+NAS2 对外叫 **oas**，三个入口：`https://oas.dimond.top`（阿里云 nginx 反代到 5080）、
+`http://8.130.124.108:5080`、局域网 `http://192.168.0.202`。站点名由 `SITE_NAME` 环境变量控制
+（`<title>` 和首页 h1），默认「文件托管服务」，NAS2 设成 `oas`。
+（注意域名是 `dimond.top`，不是 `diamond.top`。）
+
 - `ocs`：就是卡片里跑的 `src/obs/server.py`，用 `ocs-nas` 镜像。对外地址由三个环境变量决定：
   `URL_HEAD`（服务端生成的链接）、`OCS_LOCAL_BASE`（前端优先连的地址）、`OCS_FALLBACK_BASE`（前端回退）。
   挂在 80 上是为了「浏览器直接输 IP」——UGOS 自己的管理界面在 **9999**，80/443 都空着。
