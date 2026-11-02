@@ -10,8 +10,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.InputType;
-import android.util.TypedValue;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -23,37 +21,30 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.BaseAdapter;
-import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.ListAdapter;
-import android.widget.TextView;
 import android.widget.Toast;
 
 /**
  * ocs TV —— 给电视/盒子用的壳：
- *   - 全屏无地址栏，遥控器操作（方向键移动焦点/翻视频，OK 确认，返回退出）
- *   - 页面本身用 WebView 渲染；注入一段 JS，把遥控器按键翻译成页面能懂的操作
- *   - 电视上的 WebView 容易在重的页面（/video、大图）把渲染进程搞崩，崩了要能自己恢复，
- *     否则系统会把整个 App 进程一起杀掉（表现就是「闪退」）
+ *   - 首页/文件列表用 WebView（Chrome 内核），遥控器方向键移动焦点、OK 确认
+ *   - 视频一律不走 WebView：点标题进原生视频列表，点视频文件直接进原生播放器
+ *     （极米 M1 这类投影仪的 WebView 解码能力弱，播视频会把渲染进程搞崩）
+ *   - WebView 渲染进程即使崩了也能自己恢复，不会连带杀掉 App
  */
 public class TvActivity extends Activity {
 
-    private static final String PREFS = "ocs_tv";
-    private static final String KEY_URL = "base_url";
-    private static final String DEFAULT_URL = "http://oas.dimond.top";
+    private static final String PREFS = ServerDialogActivity.PREFS;
+    private static final String KEY_URL = ServerDialogActivity.KEY_URL;
+    private static final String DEFAULT_URL = ServerDialogActivity.DEFAULT_URL;
 
-    private static final String[] SERVERS = {
-            "http://oas.dimond.top",
-            "http://obs.dimond.top",
-            "http://ocs.dimond.top",
-            "http://192.168.0.201",
-            "http://192.168.0.202",
+    private static final String[] VIDEO_EXT = {
+            ".mp4", ".mkv", ".mov", ".m4v", ".webm", ".avi", ".ts", ".flv", ".wmv", ".mpg", ".mpeg"
     };
 
     private WebView web;
     private FrameLayout root;
     private String lastUrl;
+    private String loadedBase;
     private long lastCrashAt;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
@@ -70,7 +61,20 @@ public class TvActivity extends Activity {
         root.setBackgroundColor(Color.BLACK);
         setContentView(root);
 
-        installWebView(baseUrl());
+        loadedBase = baseUrl();
+        installWebView(loadedBase);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        hideSystemUi();
+        // 从「切换服务器」回来：地址变了就重载
+        String now = baseUrl();
+        if (web != null && !now.equals(loadedBase)) {
+            loadedBase = now;
+            web.loadUrl(now);
+        }
     }
 
     private void hideSystemUi() {
@@ -83,7 +87,6 @@ public class TvActivity extends Activity {
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
-    /** 建（或重建）WebView 并加载 url。渲染进程崩溃后也走这里。 */
     private void installWebView(String url) {
         if (web != null) {
             root.removeView(web);
@@ -113,8 +116,8 @@ public class TvActivity extends Activity {
         s.setBuiltInZoomControls(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        s.setUserAgentString(s.getUserAgentString() + " ocsTV/1.1");
-        s.setTextZoom(130);          // 电视上小字看不清，整体放大
+        s.setUserAgentString(s.getUserAgentString() + " ocsTV/1.2");
+        s.setTextZoom(130);          // 电视上看不清小字，整体放大
         s.setSupportZoom(false);
 
         w.setWebViewClient(new WebViewClient() {
@@ -129,7 +132,7 @@ public class TvActivity extends Activity {
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                return openExternalIfNeeded(url);
+                return route(url);
             }
 
             @Override
@@ -139,10 +142,6 @@ public class TvActivity extends Activity {
                 }
             }
 
-            /**
-             * WebView 渲染进程崩溃（电视上很常见：内存小 / 解码不支持）。
-             * 不接管的话系统会把宿主 App 一起杀掉 —— 这就是「点标题闪退」的根因。
-             */
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
                 boolean crashed = Build.VERSION.SDK_INT >= 26 && detail != null && detail.didCrash();
@@ -154,16 +153,69 @@ public class TvActivity extends Activity {
         w.setWebChromeClient(new WebChromeClient());
     }
 
-    /** 渲染进程没了：提示 + 重建 WebView，并退回文件列表（别再回那个把渲染搞崩的页面） */
+    /** 拦截导航：/video 走原生列表，视频文件走原生播放器，其余留给 WebView */
+    private boolean route(String url) {
+        if (url == null) return false;
+        Uri u = Uri.parse(url);
+        String path = u.getPath();
+        if (path == null) path = "";
+        String lower = path.toLowerCase();
+
+        if ("/video".equals(path) || "/video/".equals(path)) {
+            startActivity(new Intent(this, VideoListActivity.class));
+            return true;
+        }
+        if (lower.startsWith("/preview/")) {
+            String name = path.substring("/preview/".length());
+            if (isVideoName(name)) {
+                playVideo(base() + "/obs/" + Uri.encode(name), name);
+                return true;
+            }
+            return false;
+        }
+        if (isVideoName(lower)) {
+            playVideo(url, nameOf(path));
+            return true;
+        }
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+            return false;
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, u));
+        } catch (Exception ignored) {
+        }
+        return true;
+    }
+
+    private boolean isVideoName(String n) {
+        String s = n.toLowerCase();
+        for (String ext : VIDEO_EXT) {
+            if (s.endsWith(ext)) return true;
+        }
+        return false;
+    }
+
+    private String nameOf(String path) {
+        int i = path.lastIndexOf('/');
+        return i >= 0 ? path.substring(i + 1) : path;
+    }
+
+    private void playVideo(String url, String name) {
+        Intent it = new Intent(this, PlayerActivity.class);
+        it.putExtra("url", url);
+        it.putExtra("name", name);
+        startActivity(it);
+    }
+
+    /** 渲染进程没了：提示 + 重建 WebView，退回文件列表（别再回那个把渲染搞崩的页面） */
     private void onRendererGone(final boolean crashed) {
         final long now = System.currentTimeMillis();
         final boolean repeat = (now - lastCrashAt) < 20000;
         lastCrashAt = now;
         ui.post(() -> {
             String home = baseUrl();
-            String target = repeat ? home : (lastUrl != null && lastUrl.contains("/video") ? home : (lastUrl == null ? home : lastUrl));
-            toast(crashed
-                    ? "视频页/页面渲染崩了（电视内存或解码限制），已自动回到文件列表"
+            String target = (repeat || lastUrl == null || lastUrl.contains("/video")) ? home : lastUrl;
+            toast(crashed ? "页面渲染崩了（电视内存/解码限制），已自动回到文件列表"
                     : "页面渲染进程被系统回收，已重新加载");
             installWebView(target);
         });
@@ -172,23 +224,13 @@ public class TvActivity extends Activity {
     private void showErrorPage(String desc) {
         String html = "<html><head><meta charset='utf-8'><style>"
                 + "body{background:#111;color:#ddd;font:20px/1.6 sans-serif;padding:60px}"
-                + "h1{color:#4ea1ff;font-size:26px}code{color:#ffb86b}</style></head><body>"
+                + "h1{color:#4ea1ff;font-size:26px}</style></head><body>"
                 + "<h1>打不开这个页面</h1><p>" + (desc == null ? "" : desc) + "</p>"
                 + "<p>遥控器「菜单」键可切换服务器，返回键回上一页。</p></body></html>";
         try {
             web.loadDataWithBaseURL(baseUrl(), html, "text/html", "utf-8", null);
         } catch (Exception ignored) {
         }
-    }
-
-    private boolean openExternalIfNeeded(String url) {
-        if (url == null) return false;
-        if (url.startsWith("http://") || url.startsWith("https://")) return false;
-        try {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-        } catch (Exception ignored) {
-        }
-        return true;
     }
 
     @Override
@@ -224,7 +266,7 @@ public class TvActivity extends Activity {
                 return true;
             case KeyEvent.KEYCODE_MENU:
             case KeyEvent.KEYCODE_INFO:
-                showServerDialog();
+                startActivity(new Intent(this, ServerDialogActivity.class));
                 return true;
             default:
                 break;
@@ -251,85 +293,17 @@ public class TvActivity extends Activity {
                 .show();
     }
 
-    // ---------------------------------------------------------------- server
+    private String base() {
+        return baseUrl().replaceAll("/+$", "");
+    }
 
     private String baseUrl() {
         SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
         return sp.getString(KEY_URL, DEFAULT_URL);
     }
 
-    private void saveBaseUrl(String url) {
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_URL, url).apply();
-        if (web != null) {
-            web.loadUrl(url);
-        } else {
-            installWebView(url);
-        }
-    }
-
-    /** 遥控器「菜单」键打开：切换服务器（电视上没法输网址，这里是唯一入口） */
-    private void showServerDialog() {
-        ListAdapter adapter = new BaseAdapter() {
-            @Override
-            public int getCount() {
-                return SERVERS.length;
-            }
-
-            @Override
-            public Object getItem(int i) {
-                return SERVERS[i];
-            }
-
-            @Override
-            public long getItemId(int i) {
-                return i;
-            }
-
-            @Override
-            public View getView(int i, View convertView, ViewGroup parent) {
-                TextView tv = new TextView(TvActivity.this);
-                tv.setText(SERVERS[i]);
-                tv.setTextSize(20);
-                tv.setTextColor(SERVERS[i].equals(baseUrl()) ? 0xFF2F7CF6 : 0xFF222222);
-                tv.setPadding(dp(28), dp(20), dp(28), dp(20));
-                TypedValue out = new TypedValue();
-                getTheme().resolveAttribute(android.R.attr.selectableItemBackground, out, true);
-                tv.setBackgroundResource(out.resourceId);
-                return tv;
-            }
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("切换服务器（当前：" + baseUrl() + "）")
-                .setAdapter(adapter, (d, which) -> saveBaseUrl(SERVERS[which]))
-                .setNeutralButton("手动输入…", (d, w) -> showManualInput())
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
-    private void showManualInput() {
-        EditText et = new EditText(this);
-        et.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
-        et.setText(baseUrl());
-        new AlertDialog.Builder(this)
-                .setTitle("服务器地址")
-                .setView(et)
-                .setPositiveButton("保存", (d, w) -> {
-                    String v = et.getText().toString().trim();
-                    if (!v.isEmpty()) {
-                        if (!v.startsWith("http://") && !v.startsWith("https://")) v = "http://" + v;
-                        saveBaseUrl(v);
-                    }
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
     private void toast(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
-    }
-
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
     @Override

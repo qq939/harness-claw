@@ -11,6 +11,7 @@
 | 触摸屏 | 需要 | **不要求**（`touchscreen required=false`），只能遥控器操作 |
 | 屏幕 | 跟随系统 | 强制横屏、全屏沉浸（隐藏状态栏/导航栏） |
 | 操作 | 手指 | **遥控器**：方向键 / OK / 返回 / 菜单 |
+| 视频播放 | WebView 内播 | **原生播放器**（极米 M1 等投影仪 WebView 解码弱，会崩渲染进程） |
 | 字号 | 100% | 130%（沙发距离看得清） |
 | 默认服务器 | `https://ocs.dimond.top` | `http://oas.dimond.top` |
 | 分享接收 | 有（SEND / SEND_MULTIPLE） | 无（电视一般不用分享） |
@@ -41,7 +42,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/ocs-tv/build.ps1
 - `http://192.168.0.202/ocstv.apk`
 - `http://8.130.124.108:5080/ocstv.apk`
 
-## 崩溃处理（v1.1）
+## 视频不走 WebView（v1.2）`n`n极米 M1 这类投影仪 WebView 解码能力弱，点标题进 `/video`、或点列表里的视频文件都会让渲染进程崩溃（表现为闪退）。`n`nv1.2 起 WebView 只负责文件列表：`n`n- 点标题（`/video`）→ 原生视频列表 `VideoListActivity`（拉 `/videos` 接口，遥控器上下选、OK 播）`n- 点视频文件 / `/preview/<视频>` → 原生播放器 `PlayerActivity`（`VideoView`，OK 播放暂停、左右快退快进 10s、返回退出）`n- 播放失败会提示「这台设备播不了这个格式」，不再影响页面`n`n## 崩溃处理（v1.1）
 
 点首页标题会跳到 /video 视频页，电视上的 WebView 渲染进程容易在这类重页面上崩（内存小 / 解码不支持）。
 
