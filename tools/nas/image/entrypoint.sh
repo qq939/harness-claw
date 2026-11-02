@@ -3,7 +3,12 @@
 set -e
 
 mkdir -p /var/run/sshd /root/.ssh /data/hostkeys
+
+# 数据卷上的目录可能是 UGOS 用户（jiang / 1370450000）建的，sshd 的 StrictModes 会拒绝
+# 非 root 属主，导致 "Authentication refused: bad ownership or modes"。这里统一纠正。
+chown root:root /root/.ssh 2>/dev/null || true
 chmod 700 /root/.ssh 2>/dev/null || true
+chown -R root:root /data/hostkeys 2>/dev/null || true
 
 # 主机密钥持久化到 /data/hostkeys：容器重建后 ssh 客户端不会报 host key 变了
 if ls /data/hostkeys/ssh_host_* >/dev/null 2>&1; then
@@ -28,6 +33,7 @@ else
 fi
 
 if [ -f /root/.ssh/authorized_keys ]; then
+    chown root:root /root/.ssh/authorized_keys 2>/dev/null || true
     chmod 600 /root/.ssh/authorized_keys
 fi
 

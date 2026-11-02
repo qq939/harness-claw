@@ -87,6 +87,32 @@ NAS 上 `docker load` 会报 `archive/tar: invalid tar header`。必须先 `dock
   dockerd 随系统起时会把它们带回来（实测重启 dockerd 后容器都自动恢复）。
 - 不加额外 cron 看门狗：NAS 上 dockerd 很稳，需要时手动 `docker start ocs nas-shell frp`。
 
+## 挂载卷：`/mnt/dm-N` 会变，别写死
+
+UGOS 里 `/mnt/dm-0`、`/mnt/dm-1` 是按挂载顺序编号的，**插一块新盘 / 新建存储池就会互换**。
+2026-11-02 就踩过一次：NAS2 加了块新盘，14.6T 的老数据卷从 `dm-0` 变成了 `dm-1`，
+新盘占了 `dm-0`；容器还绑着 `/mnt/dm-0/.ugreen_nas/137045/dockerImage/ocs`，
+于是挂到一块全新的空目录上，表现为「存进去的东西都不见了」（数据其实好好的在 dm-1）。
+
+修法与约定：
+
+- 卷的稳定路径是 `/mnt/media_rw/<卷UUID>/...`（`ls -l /mnt/media_rw/` 能看到 uuid → dm-N 的映射）
+- `deploy.sh` 现在默认**自动挑「已经有 ocs 数据的那个卷」**：遍历
+  `/mnt/media_rw/*/.ugreen_nas/137045`，选 `dockerImage/ocs/obs` 文件最多的那个；
+  也可以显式传 `DATA_ROOT=/mnt/media_rw/<uuid>/.ugreen_nas/137045`
+- 换盘/加盘后，重新跑一次 `deploy.sh` 即可（幂等，会按新卷重建容器 + 修 `/obs` 软链接）
+- 顺带：`nas-shell` 的 `/root/.ssh` 在数据卷上可能属主是 UGOS 用户 `jiang`，
+  sshd 的 `StrictModes` 会拒绝（`Authentication refused: bad ownership or modes`），
+  entrypoint 里已经统一 `chown root:root` 修掉
+
+诊断三连（确认到底挂到哪了）：
+
+```sh
+ls -l /mnt/media_rw/                                   # uuid -> dm-N
+docker inspect ocs | grep -E '"Source"|"Destination"'  # 容器实际绑的路径
+ls -1 /mnt/media_rw/*/.ugreen_nas/137045/dockerImage/ocs/obs | wc -l   # 哪个卷上有数据
+```
+
 ## 文件清单
 
 - `image/` — 镜像构建文件（`Dockerfile.ocs`、`Dockerfile`、`sshd_config`、`entrypoint.sh`、`hostshell.sh`）

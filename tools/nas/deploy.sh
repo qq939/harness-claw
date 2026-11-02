@@ -1,15 +1,38 @@
 #!/bin/sh
 # 绿联 NAS 部署：ocs（文件/视频托管）+ nas-shell（SSH 运维容器）+ 可选 frpc
-# 位置：/mnt/dm-0/.ugreen_nas/137045/dockerImage/{ocs,nas-shell,frp}
+# 数据位置：<数据卷>/.ugreen_nas/137045/dockerImage/{ocs,nas-shell,frp}
 # 说明：UGOS 没有 systemctl、没有 docker compose；自启动靠 --restart=always + dockerd 随系统起。
+#
+# 重要：UGOS 的 /mnt/dm-0、/mnt/dm-1 会随插拔/新建存储池**互换**（实测 NAS2 加了新盘后
+# 数据卷从 dm-0 变成了 dm-1，容器还绑在 dm-0 就变成空目录，表现为"文件都不见了"）。
+# 所以这里默认按 /mnt/media_rw/<卷UUID> 找「已经有 ocs 数据的那个卷」，不再写死 dm-0。
+# 需要强制指定时传 DATA_ROOT=/mnt/media_rw/<uuid>/.ugreen_nas/137045
 #
 # 用法（默认参数 = NAS1 192.168.0.201，只跑 ocs + nas-shell）：
 #   sh deploy.sh
 # NAS2（192.168.0.202，额外 frp 到阿里云 5080）：
-#   NAS_IP=192.168.0.202 PUBLIC_BASE=http://8.130.124.108:5080 ENABLE_FRP=1 sh deploy.sh
+#   NAS_IP=192.168.0.202 PUBLIC_BASE=https://oas.dimond.top SITE_NAME=oas ENABLE_FRP=1 sh deploy.sh
 set -e
 
-BASE=/mnt/dm-0/.ugreen_nas/137045/dockerImage
+DATA_ROOT="${DATA_ROOT:-}"
+if [ -z "$DATA_ROOT" ]; then
+    # 在 /mnt/media_rw/*/.ugreen_nas/137045 里挑「ocs 数据最多的那个卷」
+    _best=""
+    _best_n=-1
+    for _d in /mnt/media_rw/*/.ugreen_nas/137045; do
+        [ -d "$_d/dockerImage/ocs" ] || continue
+        _n=$(ls -1 "$_d/dockerImage/ocs/obs" 2>/dev/null | wc -l)
+        if [ "$_n" -gt "$_best_n" ]; then _best="$_d"; _best_n="$_n"; fi
+    done
+    if [ -n "$_best" ]; then
+        DATA_ROOT="$_best"
+    else
+        DATA_ROOT=/mnt/dm-0/.ugreen_nas/137045
+    fi
+fi
+echo "== 0. 数据卷: $DATA_ROOT =="
+
+BASE="$DATA_ROOT/dockerImage"
 IMPORT="${IMPORT_DIR:-$BASE/_import}"
 OCS="$BASE/ocs"
 SHELL_DIR="$BASE/nas-shell"
@@ -46,7 +69,7 @@ chmod 700 "$SHELL_DIR/ssh"
 
 # 内容目录（obs）的软链接：/obs（宿主根）与存储卷用户目录根（文件管理器可见）
 ln -sfn "$OCS/obs" /obs
-ln -sfn "$OCS/obs" /mnt/dm-0/.ugreen_nas/137045/obs
+ln -sfn "$OCS/obs" "$DATA_ROOT/obs"
 
 echo "== 3. OCS 容器（${OCS_PORT} -> 8082，另挂 ${OCS_PORT_ALT}）=="
 echo "   对外地址: $PUBLIC_BASE   局域网: $LAN_URL   站点名: $SITE_NAME"
