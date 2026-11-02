@@ -116,7 +116,7 @@ public class TvActivity extends Activity {
         s.setBuiltInZoomControls(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        s.setUserAgentString(s.getUserAgentString() + " ocsTV/1.2");
+        s.setUserAgentString(s.getUserAgentString() + " ocsTV/1.3");
         s.setTextZoom(130);          // 电视上看不清小字，整体放大
         s.setSupportZoom(false);
 

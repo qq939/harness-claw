@@ -133,6 +133,39 @@ public class VideoListActivity extends Activity {
         load();
     }
 
+    /** GET 一个地址，手动跟随 301/302/303/307/308（http→https 的跳转某些设备不会自动跟） */
+    private String httpGet(String url) throws Exception {
+        String cur = url;
+        for (int hop = 0; hop < 5; hop++) {
+            HttpURLConnection c = (HttpURLConnection) new URL(cur).openConnection();
+            c.setInstanceFollowRedirects(false);
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(20000);
+            c.setRequestProperty("Accept", "application/json");
+            int code = c.getResponseCode();
+            if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                String loc = c.getHeaderField("Location");
+                c.disconnect();
+                if (loc == null) throw new RuntimeException("HTTP " + code + "（无 Location）");
+                cur = new URL(new URL(cur), loc).toString();
+                continue;
+            }
+            if (code != 200) {
+                c.disconnect();
+                throw new RuntimeException("HTTP " + code);
+            }
+            StringBuilder sb = new StringBuilder();
+            try (InputStream in = c.getInputStream();
+                 BufferedReader r = new BufferedReader(new InputStreamReader(in, "UTF-8"))) {
+                String line;
+                while ((line = r.readLine()) != null) sb.append(line);
+            }
+            c.disconnect();
+            return sb.toString();
+        }
+        throw new RuntimeException("重定向次数过多");
+    }
+
     private void load() {
         final String base = baseUrl();
         title.setText("视频 · 加载中…");
@@ -140,20 +173,7 @@ public class VideoListActivity extends Activity {
             String err = null;
             final List<String[]> got = new ArrayList<>();
             try {
-                HttpURLConnection c = (HttpURLConnection) new URL(base + "/videos").openConnection();
-                c.setConnectTimeout(10000);
-                c.setReadTimeout(20000);
-                c.setRequestProperty("Accept", "application/json");
-                int code = c.getResponseCode();
-                if (code != 200) throw new RuntimeException("HTTP " + code);
-                StringBuilder sb = new StringBuilder();
-                try (InputStream in = c.getInputStream();
-                     BufferedReader r = new BufferedReader(new InputStreamReader(in, "UTF-8"))) {
-                    String line;
-                    while ((line = r.readLine()) != null) sb.append(line);
-                }
-                c.disconnect();
-                JSONObject root = new JSONObject(sb.toString());
+                JSONObject root = new JSONObject(httpGet(base.replaceAll("/+$", "") + "/videos"));
                 JSONArray arr = root.optJSONArray("videos");
                 if (arr != null) {
                     for (int i = 0; i < arr.length(); i++) {

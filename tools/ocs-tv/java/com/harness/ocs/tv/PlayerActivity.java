@@ -18,6 +18,9 @@ public class PlayerActivity extends Activity {
 
     private VideoView vv;
     private String name;
+    private String origUrl;
+    private String curUrl;
+    private boolean triedAlt;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -32,6 +35,8 @@ public class PlayerActivity extends Activity {
             finish();
             return;
         }
+        origUrl = url;
+        curUrl = normalize(url);
 
         vv = new VideoView(this);
         setContentView(vv);
@@ -46,13 +51,44 @@ public class PlayerActivity extends Activity {
             toast("正在播放：" + (name == null ? "" : name));
         });
         vv.setOnErrorListener((mp, what, extra) -> {
-            toast("这台设备播不了这个格式（" + what + "/" + extra + "），换一个试试");
+            // 域名站点常把 http 301 到 https；MediaPlayer 不一定跟随，这里换一次协议再试
+            if (!triedAlt) {
+                triedAlt = true;
+                String alt = switchScheme(curUrl);
+                if (!alt.equals(curUrl)) {
+                    toast("换个协议重试…");
+                    curUrl = alt;
+                    vv.setVideoURI(Uri.parse(alt));
+                    return true;
+                }
+            }
+            toast("这台设备播不了这个格式（" + what + "/" + extra + "）");
             finish();
             return true;
         });
         vv.setOnCompletionListener(mp -> toast("播放结束"));
-        vv.setVideoURI(Uri.parse(url));
+        vv.setVideoURI(Uri.parse(curUrl));
         vv.requestFocus();
+    }
+
+    /** 非 IP/localhost 的 http 地址直接升级成 https（这些站点都会 301 到 https） */
+    private String normalize(String u) {
+        try {
+            java.net.URL p = new java.net.URL(u);
+            String host = p.getHost();
+            if ("http".equals(p.getProtocol()) && host != null
+                    && !host.matches("\\d{1,3}(\\.\\d{1,3}){3}") && !"localhost".equals(host)) {
+                return "https://" + u.substring("http://".length());
+            }
+        } catch (Exception ignored) {
+        }
+        return u;
+    }
+
+    private String switchScheme(String u) {
+        if (u.startsWith("https://")) return "http://" + u.substring(8);
+        if (u.startsWith("http://")) return "https://" + u.substring(7);
+        return u;
     }
 
     @Override
