@@ -10,6 +10,25 @@ chown root:root /root/.ssh 2>/dev/null || true
 chmod 700 /root/.ssh 2>/dev/null || true
 chown -R root:root /data/hostkeys 2>/dev/null || true
 
+# 宿主根目录的 /obs 软链接自愈：UGOS 升级/重置根分区后可能丢失，容器每次启动都补一次。
+# 多块存储卷时按「obs 里文件最多」挑，避免指到新插的空盘上。
+_best=""
+_best_n=-1
+for _obs in /host/mnt/media_rw/*/.ugreen_nas/137045/dockerImage/ocs/obs; do
+    [ -d "$_obs" ] || continue
+    _n=$(ls -1 "$_obs" 2>/dev/null | wc -l)
+    if [ "$_n" -gt "$_best_n" ]; then
+        _best="$_obs"
+        _best_n="$_n"
+    fi
+done
+if [ -n "$_best" ]; then
+    ln -sfn "${_best#/host}" /host/obs 2>/dev/null || true
+    # 容器内也放一个同名入口，ssh 进来直接 ls /obs 就能看到（容器根是它自己的 overlay）
+    ln -sfn /host/obs /obs 2>/dev/null || true
+    echo "[entry] /obs -> ${_best#/host} ($_best_n 个文件)"
+fi
+
 # 主机密钥持久化到 /data/hostkeys：容器重建后 ssh 客户端不会报 host key 变了
 if ls /data/hostkeys/ssh_host_* >/dev/null 2>&1; then
     cp -f /data/hostkeys/ssh_host_* /etc/ssh/ 2>/dev/null || true

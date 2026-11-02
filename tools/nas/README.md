@@ -24,10 +24,12 @@ NAS2 对外叫 **oas**，三个入口：`https://oas.dimond.top`（阿里云 ngi
 - `frp`：`fatedier/frpc:v0.65.0`，`--network host`，配置就是 harness 那份 common 段 + 一条
   `[nas202-ocs]`（local 80 → remote 5080）。
 
-内容目录 `obs/` 做了两个软链接（两台一样）：
+内容目录 `obs/` 做了软链接（两台一样）：
 
-- `/obs` —— 宿主根目录，`ssh nas hostshell` 后直接 `cd /obs`
-- `/mnt/dm-0/.ugreen_nas/137045/obs` —— 存储卷用户目录根，UGOS 文件管理器里能直接看到
+- 宿主根目录 `/obs` —— `ssh nas hostshell` 里 `cd /obs`；UGOS 升级/重置根分区后由 `nas-shell` 启动时自动补回
+  （多卷时挑「obs 里文件最多」的那个卷，不会指到新插的空盘）
+- 存储卷用户目录 `<卷>/.ugreen_nas/137045/obs` —— UGOS 文件管理器里能直接看到
+- 容器里也有 `/obs`（指向 `/host/obs`），`ssh nas` 进去直接 `ls /obs` 就行
 
 ## 访问
 
