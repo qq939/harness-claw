@@ -2,20 +2,24 @@ package com.harness.ocs.tv;
 
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.util.TypedValue;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -26,14 +30,12 @@ import android.widget.ListAdapter;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
  * ocs TV —— 给电视/盒子用的壳：
  *   - 全屏无地址栏，遥控器操作（方向键移动焦点/翻视频，OK 确认，返回退出）
  *   - 页面本身用 WebView 渲染；注入一段 JS，把遥控器按键翻译成页面能懂的操作
- *   - 没有触摸屏也能用（manifest 声明 touchscreen not required + leanback launcher）
+ *   - 电视上的 WebView 容易在重的页面（/video、大图）把渲染进程搞崩，崩了要能自己恢复，
+ *     否则系统会把整个 App 进程一起杀掉（表现就是「闪退」）
  */
 public class TvActivity extends Activity {
 
@@ -51,9 +53,13 @@ public class TvActivity extends Activity {
 
     private WebView web;
     private FrameLayout root;
+    private String lastUrl;
+    private long lastCrashAt;
+    private final Handler ui = new Handler(Looper.getMainLooper());
 
     /** 遥控器 -> 页面：JS 从 shim.js 生成（构建脚本负责转义），见 ShimJs.java */
     private static final String SHIM_JS = ShimJs.JS;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -62,18 +68,9 @@ public class TvActivity extends Activity {
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
-
-        web = new WebView(this);
-        web.setLayoutParams(new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        web.setFocusable(true);
-        web.setFocusableInTouchMode(true);
-        configureWebView(web);
-        root.addView(web);
         setContentView(root);
 
-        web.loadUrl(baseUrl());
-        web.requestFocus();
+        installWebView(baseUrl());
     }
 
     private void hideSystemUi() {
@@ -86,7 +83,27 @@ public class TvActivity extends Activity {
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
-    private void configureWebView(WebView w) {
+    /** 建（或重建）WebView 并加载 url。渲染进程崩溃后也走这里。 */
+    private void installWebView(String url) {
+        if (web != null) {
+            root.removeView(web);
+            web.destroy();
+            web = null;
+        }
+        WebView w = new WebView(this);
+        w.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        w.setFocusable(true);
+        w.setFocusableInTouchMode(true);
+        configure(w);
+        root.addView(w);
+        web = w;
+        lastUrl = url;
+        w.loadUrl(url);
+        w.requestFocus();
+    }
+
+    private void configure(WebView w) {
         WebSettings s = w.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
@@ -96,29 +113,82 @@ public class TvActivity extends Activity {
         s.setBuiltInZoomControls(false);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        s.setUserAgentString(s.getUserAgentString() + " ocsTV/1.0");
-        // 电视上看不清小字，整体放大一点
-        s.setTextZoom(130);
+        s.setUserAgentString(s.getUserAgentString() + " ocsTV/1.1");
+        s.setTextZoom(130);          // 电视上小字看不清，整体放大
+        s.setSupportZoom(false);
 
         w.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
-                view.evaluateJavascript(SHIM_JS, null);
+                lastUrl = url;
+                try {
+                    view.evaluateJavascript(SHIM_JS, null);
+                } catch (Exception ignored) {
+                }
             }
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
-                    return false;
+                return openExternalIfNeeded(url);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                if (Build.VERSION.SDK_INT >= 23 && request != null && request.isForMainFrame()) {
+                    showErrorPage(String.valueOf(error.getDescription()));
                 }
-                try {
-                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-                } catch (Exception ignored) {
-                }
-                return true;
+            }
+
+            /**
+             * WebView 渲染进程崩溃（电视上很常见：内存小 / 解码不支持）。
+             * 不接管的话系统会把宿主 App 一起杀掉 —— 这就是「点标题闪退」的根因。
+             */
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                boolean crashed = Build.VERSION.SDK_INT >= 26 && detail != null && detail.didCrash();
+                onRendererGone(crashed);
+                return true;   // 已处理，别杀进程
             }
         });
+
         w.setWebChromeClient(new WebChromeClient());
+    }
+
+    /** 渲染进程没了：提示 + 重建 WebView，并退回文件列表（别再回那个把渲染搞崩的页面） */
+    private void onRendererGone(final boolean crashed) {
+        final long now = System.currentTimeMillis();
+        final boolean repeat = (now - lastCrashAt) < 20000;
+        lastCrashAt = now;
+        ui.post(() -> {
+            String home = baseUrl();
+            String target = repeat ? home : (lastUrl != null && lastUrl.contains("/video") ? home : (lastUrl == null ? home : lastUrl));
+            toast(crashed
+                    ? "视频页/页面渲染崩了（电视内存或解码限制），已自动回到文件列表"
+                    : "页面渲染进程被系统回收，已重新加载");
+            installWebView(target);
+        });
+    }
+
+    private void showErrorPage(String desc) {
+        String html = "<html><head><meta charset='utf-8'><style>"
+                + "body{background:#111;color:#ddd;font:20px/1.6 sans-serif;padding:60px}"
+                + "h1{color:#4ea1ff;font-size:26px}code{color:#ffb86b}</style></head><body>"
+                + "<h1>打不开这个页面</h1><p>" + (desc == null ? "" : desc) + "</p>"
+                + "<p>遥控器「菜单」键可切换服务器，返回键回上一页。</p></body></html>";
+        try {
+            web.loadDataWithBaseURL(baseUrl(), html, "text/html", "utf-8", null);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean openExternalIfNeeded(String url) {
+        if (url == null) return false;
+        if (url.startsWith("http://") || url.startsWith("https://")) return false;
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception ignored) {
+        }
+        return true;
     }
 
     @Override
@@ -143,10 +213,10 @@ public class TvActivity extends Activity {
                 dir = "ok";
                 break;
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
-                web.evaluateJavascript("document.dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true}))", null);
+                js("document.dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true}))");
                 return true;
             case KeyEvent.KEYCODE_BACK:
-                if (web.canGoBack()) {
+                if (web != null && web.canGoBack()) {
                     web.goBack();
                 } else {
                     confirmExit();
@@ -160,10 +230,17 @@ public class TvActivity extends Activity {
                 break;
         }
         if (dir != null) {
-            web.evaluateJavascript("window.__ocsDpad && window.__ocsDpad('" + dir + "')", null);
+            js("window.__ocsDpad && window.__ocsDpad('" + dir + "')");
             return true;
         }
         return super.onKeyDown(keyCode, event);
+    }
+
+    private void js(String code) {
+        try {
+            if (web != null) web.evaluateJavascript(code, null);
+        } catch (Exception ignored) {
+        }
     }
 
     private void confirmExit() {
@@ -183,7 +260,11 @@ public class TvActivity extends Activity {
 
     private void saveBaseUrl(String url) {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_URL, url).apply();
-        web.loadUrl(url);
+        if (web != null) {
+            web.loadUrl(url);
+        } else {
+            installWebView(url);
+        }
     }
 
     /** 遥控器「菜单」键打开：切换服务器（电视上没法输网址，这里是唯一入口） */
@@ -243,6 +324,10 @@ public class TvActivity extends Activity {
                 .show();
     }
 
+    private void toast(String msg) {
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+    }
+
     private int dp(int v) {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
@@ -250,6 +335,7 @@ public class TvActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (web != null) {
+            root.removeView(web);
             web.destroy();
             web = null;
         }

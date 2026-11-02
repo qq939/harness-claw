@@ -41,6 +41,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/ocs-tv/build.ps1
 - `http://192.168.0.202/ocstv.apk`
 - `http://8.130.124.108:5080/ocstv.apk`
 
+## 崩溃处理（v1.1）
+
+点首页标题会跳到 /video 视频页，电视上的 WebView 渲染进程容易在这类重页面上崩（内存小 / 解码不支持）。
+
+v1.1 起接管了 WebViewClient.onRenderProcessGone：渲染进程挂掉时不再连带杀掉 App，而是提示一句、重建 WebView 并退回文件列表；/video 连续崩两次就直接回首页。加载失败会显示一个深色错误页（提示用「菜单」键换服务器）。
+
 ## 已知限制
 
 - 还是 WebView 壳，页面本身不是为电视设计的；焦点框靠 JS 描边，个别元素（如纯文字）不可点
