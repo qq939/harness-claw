@@ -101,6 +101,16 @@ UGOS 里 `/mnt/dm-0`、`/mnt/dm-1` 是按挂载顺序编号的，**插一块新�
   `/mnt/media_rw/*/.ugreen_nas/137045`，选 `dockerImage/ocs/obs` 文件最多的那个；
   也可以显式传 `DATA_ROOT=/mnt/media_rw/<uuid>/.ugreen_nas/137045`
 - 换盘/加盘后，重新跑一次 `deploy.sh` 即可（幂等，会按新卷重建容器 + 修 `/obs` 软链接）
+- 两台 NAS 的挂载现在**全部定死成 UUID 路径**，容器里看不到任何 `/mnt/dm-N`：
+
+  | 容器 | 挂载（NAS1 / NAS2 同结构） |
+  |---|---|
+  | `ocs` | `<卷>/dockerImage/ocs` → `/data` |
+  | `nas-shell` | `<卷>/dockerImage/nas-shell` → `/data`、`.../nas-shell/ssh` → `/root/.ssh`、`/mnt` → `/mnt`、`/` → `/host`、docker.sock |
+  | `frp`（NAS2） | `<卷>/dockerImage/frp` → `/etc/frp` |
+
+  其中 `/mnt` 整块挂进去，是为了让 `/mnt/media_rw/<uuid>` 这些软链接在容器里能解析
+  （只挂 `/mnt/media_rw` 的话，里面的软链接指向 `/mnt/dm-N`，容器里没有会变成断链）。
 - 顺带：`nas-shell` 的 `/root/.ssh` 在数据卷上可能属主是 UGOS 用户 `jiang`，
   sshd 的 `StrictModes` 会拒绝（`Authentication refused: bad ownership or modes`），
   entrypoint 里已经统一 `chown root:root` 修掉

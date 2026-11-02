@@ -103,7 +103,7 @@ docker run -d --name nas-shell --restart=always \
   -v "$SHELL_DIR/ssh:/root/.ssh" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /:/host \
-  -v /mnt/dm-0:/mnt/dm-0 \
+  -v /mnt:/mnt \
   -v /etc/localtime:/etc/localtime:ro \
   nas-shell:latest
 
