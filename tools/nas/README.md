@@ -83,6 +83,18 @@ py -3 tools/nas/upload_images.py     # 传 ocs / shell / frp 三个 tar.gz
 **坑**：不要用 PowerShell 的 `docker save | gzip > x.tar.gz`，`>` 是文本管道会把二进制写坏，
 NAS 上 `docker load` 会报 `archive/tar: invalid tar header`。必须先 `docker save -o` 再用 Python 压缩。
 
+## 视频全量索引（列表不再现查）
+
+OCS 会把视频清单维护成一份表：`<数据目录>/ocs/logs/videos_index.json`
+
+- 内容：`name / size / mtime / duration / hls / hlsReady` + `generated_at`
+- 后台线程每 10 分钟看一次，超过 **24h** 就重建 —— 和「每日 HLS 分片任务」开关**无关**，HLS 关着也照刷
+- `list_video_files()` 用「索引 + 实时目录」合并：同名同大小同 mtime 直接复用时长，只有新文件/改过的才 ffprobe，并回写索引
+- 接口：`GET /api/videos-index`（状态）、`POST /api/videos-index/rebuild`（立刻重建）
+
+实测：NAS1 1457 个视频，索引由后台一次建好（约 80s），之后 `/videos` 只要 **0.05s**；
+NAS2（15 个）0.01s；19082（60 个）0.27s。
+
 ## 自启动
 
 - UGOS 没有 `systemctl`，`dockerd` 由 `/etc/init.d/dockerd` 拉起；容器统一 `--restart=always`，
