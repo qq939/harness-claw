@@ -2,7 +2,9 @@ const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const TIMEOUT_MS = 3600 * 1000;
+// 单轮对话最长跑多久（小时）。48h 是上限，不是目标；卡死时靠下面的超时兜底。
+const TIMEOUT_HOURS = Number(process.env.CLAUDE_TIMEOUT_HOURS || 48);
+const TIMEOUT_MS = TIMEOUT_HOURS * 3600 * 1000;
 const CLAUDE_MSG = process.env.CLAUDE_MSG;
 const CLAUDE_IMG = process.env.CLAUDE_IMG;  // 可选，图片base64编码
 const LOG_FILE = path.join(process.env.HOME || '/home/agent', '.claude/workspace/project/logs/agent_tui.log');
@@ -123,6 +125,45 @@ const claudeArgs = ['--permission-mode', permissionMode, '--continue', '--print'
 if (systemPrompt) {
     claudeArgs.unshift('--system-prompt', systemPrompt);
 }
+// ---- 死法取证 -----------------------------------------------------------------
+// 容器里 /sys/fs/cgroup 就是本容器的 cgroup（cgroup v2: memory.events / memory.peak）。
+// 注意：如果是「宿主机」内存不足，内核杀的是 VM 里的进程，容器自己的 oom_kill 不会 +1，
+// 这种情况只能靠宿主机 dmesg / docker 事件看，所以这里把「没 +1」也明确写进日志。
+function readOomKill() {
+    for (const f of ['/sys/fs/cgroup/memory.events',
+                     '/sys/fs/cgroup/memory/memory.oom_control']) {
+        try {
+            const m = fs.readFileSync(f, 'utf8').match(/^oom_kill\s+(\d+)/m);
+            if (m) return Number(m[1]);
+        } catch (e) { /* 下一个 */ }
+    }
+    return null;
+}
+function readMemStat() {
+    const out = {};
+    const pairs = [
+        ['peak', '/sys/fs/cgroup/memory.peak'],
+        ['max_usage', '/sys/fs/cgroup/memory/memory.max_usage_in_bytes'],
+        ['current', '/sys/fs/cgroup/memory.current'],
+        ['limit', '/sys/fs/cgroup/memory.max'],
+        ['limit_v1', '/sys/fs/cgroup/memory/memory.limit_in_bytes'],
+    ];
+    for (const [k, f] of pairs) {
+        try {
+            const v = fs.readFileSync(f, 'utf8').trim();
+            out[k] = (v === 'max') ? 'max' : Number(v);
+        } catch (e) { /* 忽略 */ }
+    }
+    return out;
+}
+function mb(v) {
+    return (typeof v === 'number' && isFinite(v)) ? Math.round(v / 1048576) + 'MB' : String(v);
+}
+
+const startedAt = Date.now();
+const oomKillAtStart = readOomKill();
+const memAtStart = readMemStat();
+
 const child = spawn('claude', claudeArgs, {
     stdio: ['pipe', 'pipe', 'pipe'],
     shell: false,
@@ -130,8 +171,16 @@ const child = spawn('claude', claudeArgs, {
     env: Object.assign({}, process.env, { ANTHROPIC_DISABLE_PREFLIGHT: '1' })
 });
 
+let timedOut = false;
+console.error(`[RUN] claude started pid=${child.pid} timeout=${TIMEOUT_HOURS}h oom_kill=${oomKillAtStart} mem=${mb(memAtStart.current)}`);
+
 const timeout = setTimeout(() => {
-    console.error('[TIMEOUT] Claude process killed after 48 hours');
+    timedOut = true;
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    const line = `[TIMEOUT] Claude process killed after ${TIMEOUT_HOURS} hours`
+        + `（已运行 ${elapsed}s，pid=${child.pid}，先 SIGTERM 再 SIGKILL）`;
+    console.error(line);
+    try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
     child.kill('SIGTERM');
     setTimeout(() => child.kill('SIGKILL'), 5000);
 }, TIMEOUT_MS);
@@ -152,9 +201,36 @@ if (child.stderr) {
     });
 }
 
-child.on('close', (code) => {
+child.on('close', (code, signal) => {
     clearTimeout(timeout);
-    process.exit(code);
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+
+    if (timedOut) {
+        // 超时分支上面已经写过 [TIMEOUT]，这里只补一个退出码
+        console.error(`[TIMEOUT] claude exited code=${code} signal=${signal || '-'} elapsed=${elapsed}s`);
+    } else if (signal === 'SIGKILL' || signal === 'SIGTERM') {
+        const oomNow = readOomKill();
+        const mem = readMemStat();
+        const oomHit = (oomKillAtStart !== null && oomNow !== null && oomNow > oomKillAtStart);
+        const kind = oomHit ? 'OOM' : 'KILLED';
+        const why = oomHit
+            ? `容器 cgroup oom_kill ${oomKillAtStart}->${oomNow}（内存超限，容器内 OOM）`
+            : `容器 cgroup oom_kill 没变（${oomKillAtStart}->${oomNow}）：不是容器内存超限，`
+              + `多半是宿主机内存不足被内核杀 / 或外部 kill -9（要定死就看宿主机 dmesg 的 Out of memory）`;
+        const line = `[${kind}] Claude process killed by ${signal} after ${elapsed}s`
+            + `（peak=${mb(mem.peak || mem.max_usage)} limit=${mb(mem.limit || mem.limit_v1)}）\n`
+            + `[${kind}] ${why}`;
+        console.error(line);
+        try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
+    } else if (code !== 0) {
+        const line = `[EXIT] claude exited code=${code} signal=${signal || '-'} elapsed=${elapsed}s`;
+        console.error(line);
+        try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
+    }
+
+    // 被杀时 code 是 null，不能当成功
+    if (code !== null && code !== undefined) process.exit(code);
+    process.exit(signal === 'SIGKILL' ? 137 : signal === 'SIGTERM' ? 143 : 1);
 });
 
 child.on('error', (err) => {

@@ -203,6 +203,28 @@ for f in test_*.py; do echo "== $f"; py -3 "$f"; done
 - 每张卡片的对外能力注册到 **19081 Hub**，供别的卡片调用。
 - 卡片对外接口统一走 `http://dimond.top:<卡片端口>`。
 
+## 五·补、Agent 超时与「两种死法」
+
+单轮对话上限由 `config/rules/run_claude.js` 的 `CLAUDE_TIMEOUT_HOURS`（默认 **48**）决定；
+改完把新文件拷进各卡 `project/` 下一条消息即生效，不用重启。
+
+杀进程有三种，日志里能分开：
+
+| 日志 | 含义 | 判据 |
+|---|---|---|
+| `[TIMEOUT] Claude process killed after Nh（已运行 Xs…)` | 超时杀 | X ≈ N 小时 |
+| `[OOM] … cgroup oom_kill a->b` | 容器内存超限 | b > a（卡片设了 `--memory` 才会） |
+| `[KILLED] … cgroup oom_kill 没变` | 非容器 OOM | 多半是宿主机（Docker VM）内存不足被内核杀，或外部 kill -9 |
+| 光秃秃一行 `Killed` | 通常是 **agent 自己跑的 bash 命令**被工具超时 SIGKILL，`bash` 打印的 | 不是 agent 进程死 |
+
+一键判定：`py -3 tools/diag/kill_reason.py 19109`（查容器 cgroup `oom_kill`、`docker inspect`、
+日志取证，并列出卡片 app 自带的强杀点）。
+
+**注意**：卡片自己的 web app 里可能还有更短的上限（例如 `server.js` 里
+`setTimeout(() => child.kill('SIGKILL'), 10*60*1000)`）。这种会先于 `run_claude.js` 的 48h 生效，
+排查长时间任务被中断时一定要先扫一遍（`kill_reason.py` 会把它们列出来）。
+
+
 ## 六、安全须知（重要）
 
 面板与卡片端口都通过 frp 暴露在公网，**默认没有任何鉴权**。这意味着：
