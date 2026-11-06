@@ -109,12 +109,13 @@ def read_card_agent_state(container):
 
 
 def card_billing_state(container, usage):
-    """返回 (状态文件, 是否卡死, 是否超今日限额)。"""
+    """返回 (状态文件, 是否卡死, 是否超今日限额, 是否 48h 超时)。"""
     st = read_card_agent_state(container) or {}
     cost = (usage or {}).get("cost")
     over = bool(cost is not None and CARD_DAILY_LIMIT > 0 and float(cost) >= CARD_DAILY_LIMIT)
     stuck = (st.get("state") == "stuck")
-    return st, stuck, over
+    timed_out = (st.get("state") == "timeout")
+    return st, stuck, over, timed_out
 
 
 def _card_over_limit(container_name):
@@ -1185,9 +1186,16 @@ def create_app(docker_client=None):
         agent_type = agent_type_of(container)
         with _USAGE_LOCK:
             usage = dict(_USAGE_CACHE.get(container.name) or {}) or None
-        agent_state_file, stuck, over_limit = card_billing_state(container, usage)
-        # 卡死/熔断优先于普通 running/idle：面板金额和状态灯都跟着变
-        display_state = "limit" if over_limit else ("stuck" if stuck else agent_states.get(container.name, "idle"))
+        agent_state_file, stuck, over_limit, timed_out = card_billing_state(container, usage)
+        # 熔断 > 卡死 > 48h 超时 > 普通 running/idle：面板金额和状态灯都跟着变
+        if over_limit:
+            display_state = "limit"
+        elif stuck:
+            display_state = "stuck"
+        elif timed_out:
+            display_state = "timeout"
+        else:
+            display_state = agent_states.get(container.name, "idle")
         item = {
             "container_name": container.name,
             "agent_type": agent_type,
@@ -1201,6 +1209,7 @@ def create_app(docker_client=None):
             "agent_state": agent_state_file,
             "stuck": stuck,
             "over_limit": over_limit,
+            "timed_out": timed_out,
             "daily_limit": CARD_DAILY_LIMIT,
             "registered": _tool_record_for_container(container.name) is not None,
             "ports": _read_port_config(container.name),
@@ -2785,6 +2794,7 @@ def create_app(docker_client=None):
       .status-light.thinking {{ background: #FFD700; box-shadow: 0 0 8px rgba(255,215,0,0.7); animation: pulse-thinking 0.8s ease-in-out infinite; }}
       .status-light.done {{ background: #FF6B6B; box-shadow: 0 0 10px rgba(255,107,107,0.7); }}
       .status-light.stuck {{ background: #FF3B30; box-shadow: 0 0 12px rgba(255,59,48,0.9); animation: pulse-thinking 1s ease-in-out infinite; }}
+      .status-light.timeout {{ background: #FF3B30; box-shadow: 0 0 12px rgba(255,59,48,0.9); animation: pulse-thinking 1s ease-in-out infinite; }}
       .status-light.limit {{ background: #FF3B30; box-shadow: 0 0 12px rgba(255,59,48,0.9); animation: pulse-thinking 1s ease-in-out infinite; }}
       .alert-badge {{ display: inline-block; padding: 0 6px; border-radius: 8px; background: #ffebee; color: #c62828;
                       font-size: 11px; font-weight: 600; cursor: help; border: 1px solid #ffcdd2; }}
@@ -3722,6 +3732,10 @@ def create_app(docker_client=None):
           var st = item.agent_state || {{}};
           return '<span class="alert-badge" title="无输出超时，已判定卡死（' + (st.at_text || '') + '）">卡死</span>';
         }}
+        if (item.timed_out) {{
+          var st2 = item.agent_state || {{}};
+          return '<span class="alert-badge" title="单轮超过上限，已强制结束（' + (st2.at_text || '') + '）">超时' + (st2.timeout_hours || 48) + 'h</span>';
+        }}
         if (!item.today_cost) return '';
         var u = item.today_usage || {{}};
         return '<span class="cost-badge" title="今日 API 花费（DeepSeek 分时价折算）：'
@@ -3770,7 +3784,7 @@ def create_app(docker_client=None):
             if (costSlot) costSlot.innerHTML = badgeHtml(item);
             // 状态灯：折叠卡片同步；卡死/超限时展开卡也强制同步（要亮红灯）
             const isCollapsed = card.classList.contains("collapsed");
-            if (isCollapsed || item.state === 'stuck' || item.state === 'limit') {{
+            if (isCollapsed || item.state === 'stuck' || item.state === 'limit' || item.state === 'timeout') {{
               const light = card.querySelector('.status-light');
               if (light) {{
                 const newState = item.state || 'idle';
