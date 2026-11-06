@@ -216,7 +216,7 @@ for f in test_*.py; do echo "== $f"; py -3 "$f"; done
 | `[OOM] … cgroup oom_kill a->b` | 容器内存超限 | b > a（卡片设了 `--memory` 才会） |
 | `[KILLED] … cgroup oom_kill 没变` | 非容器 OOM | 多半是宿主机（Docker VM）内存不足被内核杀，或外部 kill -9 |
 | 光秃秃一行 `Killed` | 通常是 **agent 自己跑的 bash 命令**被工具超时 SIGKILL，`bash` 打印的 | 不是 agent 进程死 |
-| `[STUCK] 无输出 N 分钟…` | **卡死**：连续 `CLAUDE_IDLE_MINUTES`（默认 15）没有任何输出 | 面板金额处显示「卡死」+ 红灯 |
+| `[STUCK] 无输出且进程树没在烧 CPU 已 N 分钟…` | **卡死**：连续 `CLAUDE_IDLE_MINUTES`（默认 60）既没输出、进程树 CPU 也没增长 | 面板金额处显示「卡死」+ 红灯 |
 
 `run_claude.js` 每轮都会写 `logs/agent_state.json`（running / stuck / timeout / oom / killed / done），
 面板据此显示状态；**卡死**和**超限**都会让卡片金额位置变红并亮红灯。
