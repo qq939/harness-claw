@@ -5,6 +5,24 @@ const path = require('path');
 // 单轮对话最长跑多久（小时）。48h 是上限，不是目标；卡死时靠下面的超时兜底。
 const TIMEOUT_HOURS = Number(process.env.CLAUDE_TIMEOUT_HOURS || 48);
 const TIMEOUT_MS = TIMEOUT_HOURS * 3600 * 1000;
+// 无输出超时（卡死判定）：连续这么久没有 stdout/stderr 就认为卡住，主动杀掉。
+// 比总时长更能抓「死循环/卡在某个调用」，默认 15 分钟，CLAUDE_IDLE_MINUTES 可覆盖。
+const IDLE_MINUTES = Number(process.env.CLAUDE_IDLE_MINUTES || 15);
+const IDLE_MS = IDLE_MINUTES * 60 * 1000;
+const STATE_FILE = path.join(process.env.HOME || '/home/agent',
+    '.claude/workspace/project/logs/agent_state.json');
+
+function writeState(state, extra) {
+    try {
+        fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+        fs.writeFileSync(STATE_FILE, JSON.stringify(Object.assign({
+            state: state,
+            at: Date.now(),
+            at_text: localTimestamp(),
+            pid: process.pid,
+        }, extra || {})));
+    } catch (e) { /* 状态文件写不了不影响主流程 */ }
+}
 const CLAUDE_MSG = process.env.CLAUDE_MSG;
 const CLAUDE_IMG = process.env.CLAUDE_IMG;  // 可选，图片base64编码
 const LOG_FILE = path.join(process.env.HOME || '/home/agent', '.claude/workspace/project/logs/agent_tui.log');
@@ -172,7 +190,26 @@ const child = spawn('claude', claudeArgs, {
 });
 
 let timedOut = false;
-console.error(`[RUN] claude started pid=${child.pid} timeout=${TIMEOUT_HOURS}h oom_kill=${oomKillAtStart} mem=${mb(memAtStart.current)}`);
+console.error(`[RUN] claude started pid=${child.pid} timeout=${TIMEOUT_HOURS}h idle=${IDLE_MINUTES}m oom_kill=${oomKillAtStart} mem=${mb(memAtStart.current)}`);
+writeState('running', { timeout_hours: TIMEOUT_HOURS, idle_minutes: IDLE_MINUTES, started_at: startedAt });
+
+// 无输出看门狗：每 IDLE_MS/4 检查一次，超过 IDLE_MS 没动静就杀
+let lastOutputAt = Date.now();
+let stuck = false;
+const idleTimer = setInterval(() => {
+    if (stuck) return;
+    const idle = Date.now() - lastOutputAt;
+    if (idle < IDLE_MS) return;
+    stuck = true;
+    const line = `[STUCK] 无输出 ${Math.round(idle / 60000)} 分钟（阈值 ${IDLE_MINUTES} 分钟），判定卡死，杀进程`
+        + `（pid=${child.pid}，已运行 ${Math.round((Date.now() - startedAt) / 1000)}s）`;
+    console.error(line);
+    try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
+    writeState('stuck', { idle_ms: idle, idle_minutes: IDLE_MINUTES });
+    try { child.kill('SIGTERM'); } catch (e) {}
+    setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} }, 5000);
+}, Math.max(5000, Math.floor(IDLE_MS / 4)));
+if (idleTimer.unref) idleTimer.unref();
 
 const timeout = setTimeout(() => {
     timedOut = true;
@@ -188,6 +225,7 @@ const timeout = setTimeout(() => {
 if (child.stdout) {
     child.stdout.on('data', (data) => {
         const text = data.toString();
+        lastOutputAt = Date.now();
         try { fs.appendFileSync(LOG_FILE, text); } catch (e) {}
         if (CAPTURE_STDIO) process.stdout.write(text);
     });
@@ -196,6 +234,7 @@ if (child.stdout) {
 if (child.stderr) {
     child.stderr.on('data', (data) => {
         const text = data.toString();
+        lastOutputAt = Date.now();
         try { fs.appendFileSync(LOG_FILE, text); } catch (e) {}
         if (CAPTURE_STDIO) process.stderr.write(text);
     });
@@ -205,9 +244,19 @@ child.on('close', (code, signal) => {
     clearTimeout(timeout);
     const elapsed = Math.round((Date.now() - startedAt) / 1000);
 
+    if (idleTimer) clearInterval(idleTimer);
     if (timedOut) {
         // 超时分支上面已经写过 [TIMEOUT]，这里只补一个退出码
         console.error(`[TIMEOUT] claude exited code=${code} signal=${signal || '-'} elapsed=${elapsed}s`);
+        writeState('timeout', { elapsed_s: elapsed, exit_code: code, signal: signal || null });
+    } else if (stuck) {
+        // 卡死已被看门狗杀掉，这里只补一条收尾日志（别再报 KILLED/OOM 误导）
+        const oomNow = readOomKill();
+        const line = `[STUCK] claude exited signal=${signal || '-'} elapsed=${elapsed}s（无输出超过 ${IDLE_MINUTES} 分钟）`;
+        console.error(line);
+        try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
+        writeState('stuck', { elapsed_s: elapsed, signal: signal || null,
+                              oom_kill_before: oomKillAtStart, oom_kill_after: oomNow });
     } else if (signal === 'SIGKILL' || signal === 'SIGTERM') {
         const oomNow = readOomKill();
         const mem = readMemStat();
@@ -222,10 +271,15 @@ child.on('close', (code, signal) => {
             + `[${kind}] ${why}`;
         console.error(line);
         try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
+        writeState(oomHit ? 'oom' : 'killed',
+                   { elapsed_s: elapsed, signal: signal, oom_kill_before: oomKillAtStart, oom_kill_after: oomNow });
     } else if (code !== 0) {
         const line = `[EXIT] claude exited code=${code} signal=${signal || '-'} elapsed=${elapsed}s`;
         console.error(line);
         try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
+        writeState('error', { elapsed_s: elapsed, exit_code: code });
+    } else {
+        writeState('done', { elapsed_s: elapsed, exit_code: code });
     }
 
     // 被杀时 code 是 null，不能当成功
@@ -236,6 +290,7 @@ child.on('close', (code, signal) => {
 child.on('error', (err) => {
     clearTimeout(timeout);
     console.error('[ERROR]', err.message);
+    writeState('error', { reason: err.message });
     process.exit(1);
 });
 

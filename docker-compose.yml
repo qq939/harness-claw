@@ -45,6 +45,8 @@ services:
       - OPENCLAW_GATEWAY_HOST=172.30.0.10
       - OPENCLAW_GATEWAY_PORT=18790
       - TZ=Asia/Shanghai
+      # 每张卡片每天的花费上限（元）：达到即熔断（面板红灯 + 拒绝再发消息）
+      - CARD_DAILY_LIMIT=10
       # 所有 WebSocket 接口的鉴权 token（?token=xxx），默认 agent
       - HARNESS_WS_TOKEN=agent
     extra_hosts:

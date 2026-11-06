@@ -90,6 +90,42 @@ HOST_TOOLS_ROOT_ENV = "HOST_TOOLS_ROOT"
 # 只有会话 jsonl 里才有完整的分轮 usage；而且这里只读不写，不碰发消息链路。
 # ---------------------------------------------------------------------------
 USAGE_REFRESH_SECONDS = 300
+# 每张卡片每天的花费上限（人民币，按下游 usage 估算）。达到即熔断：面板红灯 + 拒绝再发消息。
+CARD_DAILY_LIMIT = float(os.environ.get("CARD_DAILY_LIMIT", "10"))
+CARD_STATE_PATH = "/home/agent/.claude/workspace/project/logs/agent_state.json"
+
+
+def read_card_agent_state(container):
+    """读卡片里 run_claude.js 写的状态文件；读不到返回 None。"""
+    try:
+        res = container.exec_run(["cat", CARD_STATE_PATH], user=AGENT_RUNTIME_USER)
+        if getattr(res, "exit_code", 1) == 0:
+            raw = (res.output or b"").decode("utf-8", "replace").strip()
+            data = json.loads(raw) if raw else None
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+    return None
+
+
+def card_billing_state(container, usage):
+    """返回 (状态文件, 是否卡死, 是否超今日限额)。"""
+    st = read_card_agent_state(container) or {}
+    cost = (usage or {}).get("cost")
+    over = bool(cost is not None and CARD_DAILY_LIMIT > 0 and float(cost) >= CARD_DAILY_LIMIT)
+    stuck = (st.get("state") == "stuck")
+    return st, stuck, over
+
+
+def _card_over_limit(container_name):
+    """给「发消息」用的轻量判断：只看 usage 缓存（5 分钟刷新一次）。"""
+    try:
+        with _USAGE_LOCK:
+            usage = dict(_USAGE_CACHE.get(container_name) or {}) or None
+        cost = (usage or {}).get("cost")
+        return bool(cost is not None and CARD_DAILY_LIMIT > 0 and float(cost) >= CARD_DAILY_LIMIT)
+    except Exception:
+        return False
 USAGE_SCAN_JS = r"""
 const fs=require("fs"),path=require("path"),os=require("os");
 const roots=[path.join(os.homedir(),".claude","projects")];
@@ -1149,6 +1185,9 @@ def create_app(docker_client=None):
         agent_type = agent_type_of(container)
         with _USAGE_LOCK:
             usage = dict(_USAGE_CACHE.get(container.name) or {}) or None
+        agent_state_file, stuck, over_limit = card_billing_state(container, usage)
+        # 卡死/熔断优先于普通 running/idle：面板金额和状态灯都跟着变
+        display_state = "limit" if over_limit else ("stuck" if stuck else agent_states.get(container.name, "idle"))
         item = {
             "container_name": container.name,
             "agent_type": agent_type,
@@ -1158,7 +1197,11 @@ def create_app(docker_client=None):
             "service_port": SERVICE_PORT,
             "managed": is_managed(container),
             "logs": _tail_logs(container, tail=200),
-            "state": agent_states.get(container.name, "idle"),
+            "state": display_state,
+            "agent_state": agent_state_file,
+            "stuck": stuck,
+            "over_limit": over_limit,
+            "daily_limit": CARD_DAILY_LIMIT,
             "registered": _tool_record_for_container(container.name) is not None,
             "ports": _read_port_config(container.name),
             # 今日花费（人民币，按 DeepSeek 分时价估算）；后台线程每 5 分钟刷新，未刷新到为 None
@@ -1630,6 +1673,8 @@ def create_app(docker_client=None):
         with_image = bool(body.get("with_image"))
         try:
             container = _require_managed(name)
+            if _card_over_limit(name):
+                return jsonify({"error": f"今日已超限额 {CARD_DAILY_LIMIT:g} 元，已熔断（明天 00:00 自动恢复）"}), 403
             labels = ((getattr(container, "attrs", {}) or {}).get("Config", {}) or {}).get("Labels", {}) or (getattr(container, "labels", {}) or {})
             agent_type = labels.get("hermit.agent_type", "")
             # 2026-10-28：空消息不再回退成 INITIAL_MESSAGE——
@@ -2739,6 +2784,10 @@ def create_app(docker_client=None):
       .status-light.idle {{ background: #3AE374; box-shadow: 0 0 6px rgba(58,227,116,0.6); }}
       .status-light.thinking {{ background: #FFD700; box-shadow: 0 0 8px rgba(255,215,0,0.7); animation: pulse-thinking 0.8s ease-in-out infinite; }}
       .status-light.done {{ background: #FF6B6B; box-shadow: 0 0 10px rgba(255,107,107,0.7); }}
+      .status-light.stuck {{ background: #FF3B30; box-shadow: 0 0 12px rgba(255,59,48,0.9); animation: pulse-thinking 1s ease-in-out infinite; }}
+      .status-light.limit {{ background: #FF3B30; box-shadow: 0 0 12px rgba(255,59,48,0.9); animation: pulse-thinking 1s ease-in-out infinite; }}
+      .alert-badge {{ display: inline-block; padding: 0 6px; border-radius: 8px; background: #ffebee; color: #c62828;
+                      font-size: 11px; font-weight: 600; cursor: help; border: 1px solid #ffcdd2; }}
       @keyframes pulse-thinking {{
         0%, 100% {{ opacity: 1; }}
         50% {{ opacity: 0.4; }}
@@ -3116,7 +3165,7 @@ def create_app(docker_client=None):
                     </select>
                   </div>
                 </div>
-                <div class="meta">${{item.agent_type}} · ${{item.host_port}}:{SERVICE_PORT} · SSH:${{item.ssh_port}}${{!item.today_cost ? '' : ' · <span class="cost-badge" title="今日 API 花费（DeepSeek 分时价折算）：' + (item.today_usage.turns || 0) + ' 轮 · 未命中 ' + (item.today_usage.fresh || 0) + ' · 缓存 ' + (item.today_usage.cached || 0) + ' · 输出 ' + (item.today_usage.out || 0) + ' tokens">今日 ¥' + Number(item.today_cost).toFixed(2) + '</span>'}}</div>
+                <div class="meta">${{item.agent_type}} · ${{item.host_port}}:{SERVICE_PORT} · SSH:${{item.ssh_port}}<span class="cost-slot">${{badgeHtml(item)}}</span></div>
               </div>
             </div>
             <div class="meta ${{stCls}}" data-status="${{item.status}}" data-port="${{item.host_port}}" style="display:flex;align-items:center;gap:6px;">
@@ -3665,6 +3714,21 @@ def create_app(docker_client=None):
         return div;
       }}
 
+      function badgeHtml(item) {{
+        if (item.over_limit) {{
+          return '<span class="alert-badge" title="今日花费已达上限，已停止接单（明天 00:00 恢复）">今日超限额' + item.daily_limit + '元</span>';
+        }}
+        if (item.stuck) {{
+          var st = item.agent_state || {{}};
+          return '<span class="alert-badge" title="无输出超时，已判定卡死（' + (st.at_text || '') + '）">卡死</span>';
+        }}
+        if (!item.today_cost) return '';
+        var u = item.today_usage || {{}};
+        return '<span class="cost-badge" title="今日 API 花费（DeepSeek 分时价折算）：'
+          + (u.turns || 0) + ' 轮 · 未命中 ' + (u.fresh || 0) + ' · 缓存 ' + (u.cached || 0)
+          + ' · 输出 ' + (u.out || 0) + ' tokens">今日 ¥' + Number(item.today_cost).toFixed(2) + '</span>';
+      }}
+
       async function refreshCards() {{
         const res = await fetch(`/api/agents?tail=${{tail}}`, {{ cache: "no-store" }});
         const data = await res.json();
@@ -3701,9 +3765,12 @@ def create_app(docker_client=None):
                  }}
                }}
             }}
-            // 状态灯：仅折叠卡片从服务器同步；展开卡片保持当前状态不动
+            // 金额位：卡死/超限时替换成红色提示
+            const costSlot = card.querySelector('.cost-slot');
+            if (costSlot) costSlot.innerHTML = badgeHtml(item);
+            // 状态灯：折叠卡片同步；卡死/超限时展开卡也强制同步（要亮红灯）
             const isCollapsed = card.classList.contains("collapsed");
-            if (isCollapsed) {{
+            if (isCollapsed || item.state === 'stuck' || item.state === 'limit') {{
               const light = card.querySelector('.status-light');
               if (light) {{
                 const newState = item.state || 'idle';
