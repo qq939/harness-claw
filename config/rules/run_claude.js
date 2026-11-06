@@ -5,11 +5,14 @@ const path = require('path');
 // 单轮对话最长跑多久（小时）。48h 是上限，不是目标；卡死时靠下面的超时兜底。
 const TIMEOUT_HOURS = Number(process.env.CLAUDE_TIMEOUT_HOURS || 48);
 const TIMEOUT_MS = TIMEOUT_HOURS * 3600 * 1000;
-// 卡死判定：连续这么久「既没有 stdout/stderr，进程树也没在烧 CPU」才认为卡住，主动杀掉。
-// 只看输出会误杀合法长任务（ffmpeg 转码/大文件下载在 --print 下也是安静的），所以加了 CPU 判据。
-// 默认 60 分钟，CLAUDE_IDLE_MINUTES 可覆盖。
-const IDLE_MINUTES = Number(process.env.CLAUDE_IDLE_MINUTES || 60);
-const IDLE_MS = IDLE_MINUTES * 60 * 1000;
+// 卡死判定：只看「连续多久没有 stdout/stderr」——不要用 CPU 判断活着，
+// 因为卡住的进程（ping 循环 / 死循环）照样烧 CPU，那样永远抓不到。
+// 默认：60 分钟没输出只「标记卡死」（面板亮红灯），不杀进程；CLAUDE_IDLE_MARK_MINUTES=0 关掉标记。
+// 需要「卡死就杀」的卡片，显式设 CLAUDE_IDLE_KILL_MINUTES（默认 0 = 不杀）。
+const IDLE_MARK_MINUTES = Number(process.env.CLAUDE_IDLE_MARK_MINUTES || 60);
+const IDLE_KILL_MINUTES = Number(process.env.CLAUDE_IDLE_KILL_MINUTES || 0);
+const IDLE_MARK_MS = IDLE_MARK_MINUTES * 60 * 1000;
+const IDLE_KILL_MS = IDLE_KILL_MINUTES * 60 * 1000;
 const STATE_FILE = path.join(process.env.HOME || '/home/agent',
     '.claude/workspace/project/logs/agent_state.json');
 
@@ -191,77 +194,48 @@ const child = spawn('claude', claudeArgs, {
 });
 
 let timedOut = false;
-console.error(`[RUN] claude started pid=${child.pid} timeout=${TIMEOUT_HOURS}h idle=${IDLE_MINUTES}m oom_kill=${oomKillAtStart} mem=${mb(memAtStart.current)}`);
-writeState('running', { timeout_hours: TIMEOUT_HOURS, idle_minutes: IDLE_MINUTES, started_at: startedAt });
+console.error(`[RUN] claude started pid=${child.pid} timeout=${TIMEOUT_HOURS}h idle_mark=${IDLE_MARK_MINUTES}m idle_kill=${IDLE_KILL_MINUTES}m oom_kill=${oomKillAtStart} mem=${mb(memAtStart.current)}`);
+writeState('running', { timeout_hours: TIMEOUT_HOURS, idle_mark_minutes: IDLE_MARK_MINUTES, idle_kill_minutes: IDLE_KILL_MINUTES, started_at: startedAt });
 
-// 读数：/proc/<pid>/stat 的 utime+stime（单位：clock tick，这里只比较差值，不需要换算）
-function readProcCpu(pid) {
-    try {
-        const s = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
-        const rp = s.lastIndexOf(')');
-        const rest = s.slice(rp + 2).split(' ');
-        return { ppid: Number(rest[1]), cpu: Number(rest[11]) + Number(rest[12]) };
-    } catch (e) {
-        return null;
-    }
-}
-
-// 整个进程树（claude + 它拉起的 ffmpeg/python/curl…）的累计 CPU
-function treeCpu(rootPid) {
-    try {
-        const procs = new Map();
-        for (const d of fs.readdirSync('/proc')) {
-            if (!/^\d+$/.test(d)) continue;
-            const p = readProcCpu(d);
-            if (p) procs.set(Number(d), p);
-        }
-        let sum = 0;
-        const stack = [rootPid];
-        const seen = new Set();
-        while (stack.length) {
-            const pid = stack.pop();
-            if (seen.has(pid)) continue;
-            seen.add(pid);
-            const p = procs.get(pid);
-            if (!p) continue;
-            sum += p.cpu;
-            for (const [cp, cv] of procs) {
-                if (cv.ppid === pid) stack.push(cp);
-            }
-        }
-        return sum;
-    } catch (e) {
-        return null;
-    }
-}
-
-// 看门狗：每 min(60s, IDLE_MS/4) 检查一次
-//   - stdout/stderr 有数据 → 刷新（上面的 data 回调）
-//   - 进程树 CPU 增长 >= 0.5s → 认为在干活，也刷新
-//   - 两者都没有且超过 IDLE_MS → 判定卡死
+// 看门狗：只看「多久没有 stdout/stderr」。
+//   到 IDLE_MARK_MS → 标记卡死（写 state，面板亮红灯），进程继续跑
+//   到 IDLE_KILL_MS（默认 0 = 关）→ 才真的杀
 let lastOutputAt = Date.now();
 let stuck = false;
-let lastTreeCpu = null;
-const CPU_ACTIVE_TICKS = 0.5;   // 每个检查周期至少烧 0.5s CPU 才算“在干活”（约 1% 单核）
-const idleTick = Math.max(2000, Math.min(60000, Math.floor(IDLE_MS / 4)));
+// 检查频率跟着阈值走：小阈值（测试/激进配置）也能及时触发，默认 30 秒一次
+const _idleBase = Math.min(IDLE_MARK_MS > 0 ? IDLE_MARK_MS : Infinity,
+                           IDLE_KILL_MS > 0 ? IDLE_KILL_MS : Infinity);
+const idleTick = Math.max(2000, Math.min(30000, Math.floor(_idleBase / 4) || 30000));
 const idleTimer = setInterval(() => {
     if (stuck) return;
-    const cpu = treeCpu(child.pid);
-    if (cpu !== null && lastTreeCpu !== null && (cpu - lastTreeCpu) >= CPU_ACTIVE_TICKS) {
-        lastOutputAt = Date.now();
-    }
-    lastTreeCpu = cpu;
     const idle = Date.now() - lastOutputAt;
-    if (idle < IDLE_MS) return;
-    stuck = true;
-    const line = `[STUCK] 无输出且进程树没在烧 CPU 已 ${Math.round(idle / 60000)} 分钟（阈值 ${IDLE_MINUTES} 分钟），判定卡死，杀进程`
-        + `（pid=${child.pid}，已运行 ${Math.round((Date.now() - startedAt) / 1000)}s）`;
-    console.error(line);
-    try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
-    writeState('stuck', { idle_ms: idle, idle_minutes: IDLE_MINUTES });
-    try { child.kill('SIGTERM'); } catch (e) {}
-    setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} }, 5000);
-}, Math.max(5000, Math.floor(IDLE_MS / 4)));
+    const markMs = IDLE_MARK_MS;
+    const killMs = IDLE_KILL_MS;
+    if (markMs > 0 && idle >= markMs) {
+        stuck = true;
+        const line = `[STUCK] 已 ${Math.round(idle / 60000)} 分钟没有输出（标记阈值 ${IDLE_MARK_MINUTES} 分钟）`
+            + `，仅标记卡死、不杀进程（pid=${child.pid}，已运行 ${Math.round((Date.now() - startedAt) / 1000)}s）`;
+        console.error(line);
+        try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
+        writeState('stuck', { idle_ms: idle, idle_minutes: IDLE_MARK_MINUTES, killed: false });
+        if (killMs > 0 && idle >= killMs) {
+            const killLine = `[STUCK] 超过强杀阈值 ${IDLE_KILL_MINUTES} 分钟，杀进程（pid=${child.pid}）`;
+            console.error(killLine);
+            try { fs.appendFileSync(LOG_FILE, `\n${killLine}\n`); } catch (e) {}
+            writeState('stuck', { idle_ms: idle, idle_minutes: IDLE_KILL_MINUTES, killed: true });
+            try { child.kill('SIGTERM'); } catch (e) {}
+            setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} }, 5000);
+        }
+    } else if (killMs > 0 && idle >= killMs) {
+        stuck = true;
+        const killLine = `[STUCK] 已 ${Math.round(idle / 60000)} 分钟没有输出，超过强杀阈值 ${IDLE_KILL_MINUTES} 分钟，杀进程`;
+        console.error(killLine);
+        try { fs.appendFileSync(LOG_FILE, `\n${killLine}\n`); } catch (e) {}
+        writeState('stuck', { idle_ms: idle, idle_minutes: IDLE_KILL_MINUTES, killed: true });
+        try { child.kill('SIGTERM'); } catch (e) {}
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} }, 5000);
+    }
+}, idleTick);
 if (idleTimer.unref) idleTimer.unref();
 
 const timeout = setTimeout(() => {
@@ -305,7 +279,7 @@ child.on('close', (code, signal) => {
     } else if (stuck) {
         // 卡死已被看门狗杀掉，这里只补一条收尾日志（别再报 KILLED/OOM 误导）
         const oomNow = readOomKill();
-        const line = `[STUCK] claude exited signal=${signal || '-'} elapsed=${elapsed}s（无输出且无 CPU 超过 ${IDLE_MINUTES} 分钟）`;
+        const line = `[STUCK] claude exited signal=${signal || '-'} elapsed=${elapsed}s（无输出超过 ${IDLE_MARK_MINUTES} 分钟，已标记卡死）`;
         console.error(line);
         try { fs.appendFileSync(LOG_FILE, `\n${line}\n`); } catch (e) {}
         writeState('stuck', { elapsed_s: elapsed, signal: signal || null,

@@ -216,10 +216,14 @@ for f in test_*.py; do echo "== $f"; py -3 "$f"; done
 | `[OOM] … cgroup oom_kill a->b` | 容器内存超限 | b > a（卡片设了 `--memory` 才会） |
 | `[KILLED] … cgroup oom_kill 没变` | 非容器 OOM | 多半是宿主机（Docker VM）内存不足被内核杀，或外部 kill -9 |
 | 光秃秃一行 `Killed` | 通常是 **agent 自己跑的 bash 命令**被工具超时 SIGKILL，`bash` 打印的 | 不是 agent 进程死 |
-| `[STUCK] 无输出且进程树没在烧 CPU 已 N 分钟…` | **卡死**：连续 `CLAUDE_IDLE_MINUTES`（默认 60）既没输出、进程树 CPU 也没增长 | 面板金额处显示「卡死」+ 红灯 |
+| `[STUCK] 已 N 分钟没有输出…仅标记卡死、不杀进程` | **卡死**：连续 `CLAUDE_IDLE_MARK_MINUTES`（默认 60）没有输出 | 面板金额处显示「卡死」+ 红灯，**进程不杀** |
 
 `run_claude.js` 每轮都会写 `logs/agent_state.json`（running / stuck / timeout / oom / killed / done），
 面板据此显示状态；**卡死**和**超限**都会让卡片金额位置变红并亮红灯。
+
+卡死**只标记不杀**（CPU 判据不成立：卡住的进程照样烧 CPU，所以只看“有没有输出”）；
+真正终止只有两种：`CLAUDE_TIMEOUT_HOURS`（默认 48h）和 `CARD_DAILY_LIMIT`（默认 10 元/天）。
+某个卡片确实想“卡死就杀”，给它设 `CLAUDE_IDLE_KILL_MINUTES`（默认 0 = 不杀）。
 
 **熔断**：每张卡片每天花费上限 `CARD_DAILY_LIMIT`（默认 10 元）。达到后：
 面板金额处显示「今日超限额10元」+ 红灯，`POST /api/agents/<卡>/send-message` 直接 403（次日 00:00 自动恢复）。
