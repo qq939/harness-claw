@@ -49,26 +49,53 @@ $UserKeys   = Join-Path $env:USERPROFILE '.ssh\authorized_keys'
 $SshdConfig = Join-Path $SshDir 'sshd_config'
 
 # ---------------------------------------------------------------------------
-# 1. 安装 / 启动 sshd
+# 1. 安装 / 启动 sshd（失败不抛异常，返回 $false，后面照常写 key）
 # ---------------------------------------------------------------------------
+function Wait-SshdService([int]$seconds) {
+    for ($i = 0; $i -lt $seconds; $i++) {
+        $s = Get-Service -Name sshd -ErrorAction SilentlyContinue
+        if ($s) { return $s }
+        Start-Sleep -Seconds 1
+    }
+    return $null
+}
+
+function Register-SshdService {
+    # 极少数机器装了 OpenSSH 但没注册服务（或者被清理过）：用自带 exe 手动注册
+    $exe = Join-Path $env:WINDIR 'System32\OpenSSH\sshd.exe'
+    if (-not (Test-Path $exe)) { $exe = Join-Path $env:ProgramFiles 'OpenSSH\sshd.exe' }
+    if (-not (Test-Path $exe)) { return $null }
+    Write-Host "  sshd.exe 在但服务没注册，手动注册服务…" -ForegroundColor Yellow
+    & sc.exe create sshd binPath= "`"$exe`"" start= auto DisplayName= "OpenSSH SSH Server" | Out-Null
+    & sc.exe description sshd "OpenSSH SSH Server" | Out-Null
+    return (Wait-SshdService 5)
+}
+
 function Ensure-Sshd {
     $svc = Get-Service -Name sshd -ErrorAction SilentlyContinue
     if (-not $svc) {
         Write-Host "  未发现 sshd 服务，安装 OpenSSH Server…" -ForegroundColor Yellow
         if ($DryRun) {
             Write-Host "[DryRun] 会执行 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0" -ForegroundColor Cyan
-            return
+            return $true
         }
         $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($cap -and $cap.State -ne 'Installed') {
-            Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+            try {
+                Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+            } catch {
+                Write-Warning "  Add-WindowsCapability 失败：$($_.Exception.Message)"
+            }
         }
-        $svc = Get-Service -Name sshd -ErrorAction SilentlyContinue
+        # 装完后服务注册有延迟，轮询 30 秒；还不行就看 exe 在不在、手动注册
+        $svc = Wait-SshdService 30
+        if (-not $svc) { $svc = Register-SshdService }
         if (-not $svc) {
-            Write-Host "  自动安装失败（可能没网 / 被 WSUS 拦），手动装法：" -ForegroundColor Red
+            Write-Host "  自动安装失败。手动装法（管理员）：" -ForegroundColor Red
             Write-Host "    Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0" -ForegroundColor Yellow
             Write-Host "  或：设置 -> 应用 -> 可选功能 -> 添加功能 -> OpenSSH 服务器" -ForegroundColor Yellow
-            throw "sshd 未安装"
+            Write-Host "  装完重跑本脚本即可（密钥部分不受影响）" -ForegroundColor Yellow
+            return $false
         }
         Write-Host "  OpenSSH Server 安装完成" -ForegroundColor Green
     } else {
@@ -77,14 +104,20 @@ function Ensure-Sshd {
 
     if ($DryRun) {
         Write-Host "[DryRun] 会把 sshd 设为自动启动并启动（需要管理员）" -ForegroundColor Cyan
-        return
+        return $true
     }
 
-    Set-Service -Name sshd -StartupType Automatic
-    $agentSvc = Get-Service -Name ssh-agent -ErrorAction SilentlyContinue
-    if ($agentSvc -and $agentSvc.Status -ne 'Running') { Start-Service ssh-agent -ErrorAction SilentlyContinue }
-    Start-Service sshd -ErrorAction SilentlyContinue
-    Write-Host "  sshd 已设为自动启动并启动" -ForegroundColor Green
+    try {
+        Set-Service -Name sshd -StartupType Automatic
+        $agentSvc = Get-Service -Name ssh-agent -ErrorAction SilentlyContinue
+        if ($agentSvc -and $agentSvc.Status -ne 'Running') { Start-Service ssh-agent -ErrorAction SilentlyContinue }
+        Start-Service sshd -ErrorAction SilentlyContinue
+        Write-Host "  sshd 已设为自动启动并启动" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Warning "  启动 sshd 失败：$($_.Exception.Message)"
+        return $false
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -193,7 +226,7 @@ function Fix-AdminAcl([string]$path) {
 # 执行
 # ---------------------------------------------------------------------------
 Write-Host "=== 1. SSH 服务 ===" -ForegroundColor Yellow
-Ensure-Sshd
+$svcOk = Ensure-Sshd
 Ensure-SshdConfig
 Ensure-HostKeys
 Ensure-Firewall
@@ -205,23 +238,30 @@ if (-not $DryRun) { Fix-AdminAcl -path $AdminKeys }
 Write-Host "=== 3. 写入当前用户授权文件 ===" -ForegroundColor Yellow
 Merge-Keys -path $UserKeys -keys $PublicKeys
 
-if (-not $DryRun) {
+if (-not $DryRun -and $svcOk) {
     Write-Host "=== 4. 重启 sshd 并检查 ===" -ForegroundColor Yellow
-    Restart-Service sshd
-    Start-Sleep -Seconds 2
-    Get-Service sshd | Format-Table Name, Status, StartType -AutoSize
+    try {
+        Restart-Service sshd
+        Start-Sleep -Seconds 2
+        Get-Service sshd | Format-Table Name, Status, StartType -AutoSize
 
-    $ok = $false
-    for ($i = 0; $i -lt 10; $i++) {
-        $listen = @(Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue).Count
-        if ($listen -gt 0) { $ok = $true; break }
-        Start-Sleep -Seconds 1
+        $ok = $false
+        for ($i = 0; $i -lt 10; $i++) {
+            $listen = @(Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue).Count
+            if ($listen -gt 0) { $ok = $true; break }
+            Start-Sleep -Seconds 1
+        }
+        if ($ok) {
+            Write-Host "  22 端口监听: 是" -ForegroundColor Green
+        } else {
+            Write-Host "  22 端口监听: 否（看 C:\ProgramData\ssh\logs\sshd.log）" -ForegroundColor Red
+        }
+    } catch {
+        Write-Warning "  重启 sshd 失败：$($_.Exception.Message)"
     }
-    if ($ok) {
-        Write-Host "  22 端口监听: 是" -ForegroundColor Green
-    } else {
-        Write-Host "  22 端口监听: 否（看 C:\ProgramData\ssh\logs\sshd.log）" -ForegroundColor Red
-    }
+} elseif (-not $DryRun) {
+    Write-Host "=== 4. sshd 没跑起来，跳过重启检查 ===" -ForegroundColor Yellow
+    Write-Host "  密钥已写好；装完 OpenSSH Server 后再跑一次本脚本就会自动启动" -ForegroundColor Yellow
 }
 
 $who = $env:USERNAME
