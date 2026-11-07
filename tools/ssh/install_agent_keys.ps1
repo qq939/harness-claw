@@ -126,8 +126,9 @@ if (-not $DryRun) {
     }
 }
 
+$who = $env:USERNAME
 Write-Host ""
-Write-Host "完成。用这两把私钥验证：" -ForegroundColor Yellow
-Write-Host "  ssh -i <harness-agent 私钥> -p 18022 qq939@dimond.top"
-Write-Host "  ssh -i <hatch 私钥>         -p 18022 qq939@dimond.top"
-Write-Host "（本机直连则去掉 -p 18022）"
+Write-Host "完成。用这两把私钥验证（登录名 $who）：" -ForegroundColor Yellow
+Write-Host "  ssh -i <harness-agent 私钥> -p 18022 $who@dimond.top"
+Write-Host "  ssh -i <hatch 私钥>         -p 18022 $who@dimond.top"
+Write-Host "（本机直连则去掉 -p 18022；公网 18022 若不通，先确认 frp 映射）"
