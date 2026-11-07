@@ -28,9 +28,18 @@ $ErrorActionPreference = 'Stop'
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $DryRun) {
-    Write-Host "需要管理员权限：右键 PowerShell -> 以管理员身份运行，或：" -ForegroundColor Red
-    Write-Host "  Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy','Bypass','-File','$PSCommandPath'"
-    exit 1
+    Write-Host "需要管理员权限，正在提权（UAC 弹窗请点「是」）..." -ForegroundColor Yellow
+    try {
+        Start-Process powershell -Verb RunAs -ErrorAction Stop -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`""
+        )
+        Write-Host "已在新窗口继续执行，本窗口可以关掉。" -ForegroundColor Green
+    } catch {
+        Write-Host "提权被拒绝：$($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "请手动以管理员身份运行： $PSCommandPath" -ForegroundColor Red
+        exit 1
+    }
+    exit 0
 }
 
 # ---------------------------------------------------------------------------

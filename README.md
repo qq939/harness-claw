@@ -249,3 +249,48 @@ for f in test_*.py; do echo "== $f"; py -3 "$f"; done
 1. 给面板 / WebShell 加一层 Basic Auth 或反向代理鉴权。
 2. 把卡片 sshd 的 `PasswordAuthentication` 关掉，只用公钥（`authorized_keys`）。
 3. 定期检查 `docker logs hermit-control-19080` 里的访问记录与卡片里的 `~/.bash_history`。
+
+## 七、宿主机 SSH（给 agent 用）
+
+宿主机 `hermit.dimond.top`（Windows）走已有的 frp SSH 通道，agent 用公钥直连：
+
+| 入口 | 说明 |
+| --- | --- |
+| `dimond.top:19022` | frp `[ssh]` → `host.docker.internal:22`，**agent 走这个** |
+| `127.0.0.1:22` | 本机直连 |
+
+账号 `qq939` / `jiang`，私钥 `~/.ssh/hermit_agent`。授权的两把公钥：
+
+```
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOxkOJyvWXGXoLvyZIxCwB/c/dD6879Cpv7EFl8PI1AU harness-agent@hermit
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEiKs4bL6Qxj97ClbAgTAIMGoyUk1rkLFeqv05+oIDeS hatch
+```
+
+**Windows 的坑**：账号只要在 Administrators 组，sshd 就**只认**
+`%ProgramData%\ssh\administrators_authorized_keys`，会完全忽略 `~/.ssh/authorized_keys`；
+而那个文件必须是 SYSTEM + Administrators 独占 ACL，否则 sshd 静默跳过，日志里只表现为
+`Permission denied (publickey)`。所以装 key 必须管理员权限：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\ssh\install_agent_keys.ps1
+```
+
+脚本会自动 UAC 提权、幂等可重跑，`-DryRun` 只打印不改。验证：
+
+```powershell
+ssh -i ~/.ssh/hermit_agent -p 19022 jiang@dimond.top "hostname; whoami"
+# gpu
+# jiang
+```
+
+frp 侧规则（`frpc.ini`，改完 `docker restart frpc`）：
+
+```ini
+[ssh]
+type = tcp
+local_ip = host.docker.internal
+local_port = 22
+remote_port = 19022
+```
+
+> 注：不需要再单开 18022 之类的端口，19022 这一条就是宿主机的 SSH 入口。
