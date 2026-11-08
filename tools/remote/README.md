@@ -58,9 +58,9 @@ session 1）。所以真正注入的进程必须跑在交互式会话：用计�
    schtasks /create /tn HermitRemoteInput /tr "\"<pythonw.exe>\" \"<host_input_agent.py>\"" /sc once /st 00:00 /it /f
    ```
 4. 卡片容器里 `./user_start.sh`（或重启容器，`start.sh` 会自动调它）
-5. 访问 `http://dimond.top:19111/r/<token>`，token 存在卡片 `workspaces/19111-remote/.token`
+5. 打开 `http://dimond.top:19111`，首次/空闲 10 分钟会要求输入密码 `agent`；接口侧用 `?token=agent`
 
 ## 安全
 
-页面 URL 里的 token 是唯一凭据：**拿到 URL 的人就能操作这台宿主机**。不要外发。
-改 token：直接改 `.token` 文件后重启卡片里的 `remote_app.py`。
+页面是密码保护（默认 `agent`，`REMOTE_PASSWORD` 可改），空闲 10 分钟（`REMOTE_IDLE_SECONDS`）后重新验证；接口必须带 `?token=agent`（`REMOTE_TOKEN` 可改）。**密码/URL 泄露等于交出宿主机控制权**，不要外发。
+改密码/令牌：设置环境变量 `REMOTE_PASSWORD` / `REMOTE_TOKEN` 后重启卡片里的 `remote_app.py`；会话签名密钥在卡片 `.secret`（自动生成）。
