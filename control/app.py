@@ -1249,10 +1249,13 @@ def create_app(docker_client=None):
   <style>
     body {{ margin: 0; padding: 4px; background: #1e1e1e; overflow: hidden; }}
     #terminal {{ width: 100%; height: 100vh; }}
+    #drop-hint {{ position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); color: #fff; font: 16px sans-serif; z-index: 99; border: 3px dashed #4caf50; box-sizing: border-box; }}
+    #drop-hint.show {{ display: flex; }}
   </style>
 </head>
 <body>
   <div id="terminal"></div>
+  <div id="drop-hint">松开鼠标：上传到当前目录</div>
   <script>
     const term = new Terminal({{ cursorBlink: true, fontSize: 14, fontFamily: 'Menlo, Monaco, "Courier New", monospace' }});
     const fitAddon = new FitAddon.FitAddon();
@@ -1281,6 +1284,39 @@ def create_app(docker_client=None):
     ws.onerror = (err) => {{
       term.write('\\r\\n\\x1b[31m[WebSocket Error]\\x1b[0m\\r\\n');
     }};
+
+    // ---- 拖拽上传：文件落到交互 shell 的当前目录 ----
+    const dropHint = document.getElementById('drop-hint');
+    const DROP_CHUNK = 4 * 1024 * 1024;
+
+    async function sendFile(file) {{
+      if (ws.readyState !== WebSocket.OPEN) {{
+        term.write('\\r\\n\\x1b[31m[上传] 连接已断开\\x1b[0m\\r\\n');
+        return;
+      }}
+      term.write('\\x1b[36m[上传] ' + file.name + ' (' + file.size + ' 字节)…\\x1b[0m\\r\\n');
+      ws.send('\\u0000' + JSON.stringify({{ t: 'drop-start', name: file.name, size: file.size }}));
+      const buf = await file.arrayBuffer();
+      for (let off = 0; off < buf.byteLength; off += DROP_CHUNK) {{
+        ws.send(buf.slice(off, off + DROP_CHUNK));
+      }}
+      ws.send('\\u0000' + JSON.stringify({{ t: 'drop-end', name: file.name }}));
+    }}
+
+    ['dragenter', 'dragover'].forEach(ev => window.addEventListener(ev, e => {{
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      dropHint.classList.add('show');
+    }}));
+    window.addEventListener('dragleave', e => {{
+      if (e.relatedTarget === null) dropHint.classList.remove('show');
+    }});
+    window.addEventListener('drop', async e => {{
+      e.preventDefault();
+      dropHint.classList.remove('show');
+      const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
+      for (const f of files) await sendFile(f);
+    }});
 
     window.addEventListener('resize', () => fitAddon.fit());
   </script>
@@ -1380,10 +1416,95 @@ def create_app(docker_client=None):
             t = threading.Thread(target=pump, daemon=True)
             t.start()
 
+            # ---- 拖拽上传：二进制帧是文件内容，\x00{ 开头的文本帧是控制消息 ----
+            DROP_MAX = 200 * 1024 * 1024
+            drop = {"name": None, "buf": bytearray()}
+
+            def _reset_drop():
+                drop["name"] = None
+                drop["buf"] = bytearray()
+
+            def _drop_error(text):
+                try:
+                    ws.send("\r\n\x1b[31m[上传失败] %s\x1b[0m\r\n" % text)
+                except Exception:
+                    pass
+
+            def _shell_cwd(sftp):
+                """让交互 shell 把 pwd 写进临时文件，从而拿到它此刻的 cwd。"""
+                probe = "/tmp/.dndcwd-" + uuid.uuid4().hex[:8]
+                try:
+                    # \x15 先清掉用户可能敲了一半的输入行
+                    chan.send("\x15pwd > %s\r" % probe)
+                    deadline = time.time() + 4
+                    while time.time() < deadline:
+                        try:
+                            with sftp.open(probe, "r") as fh:
+                                return fh.read().decode("utf-8", "replace").strip()
+                        except IOError:
+                            time.sleep(0.05)
+                    return None
+                finally:
+                    try:
+                        sftp.remove(probe)
+                    except Exception:
+                        pass
+
+            def _finish_drop():
+                name = drop["name"] or "upload"
+                data = bytes(drop["buf"])
+                _reset_drop()
+                try:
+                    sftp = ssh.open_sftp()
+                except Exception as exc:
+                    _drop_error("SFTP 不可用: %s" % exc)
+                    return
+                dest = None
+                try:
+                    cwd = _shell_cwd(sftp)
+                    if not cwd:
+                        _drop_error("拿不到当前目录（shell 可能正停在前台程序里）")
+                        return
+                    dest = os.path.join(cwd, name)
+                    with sftp.file(dest, "wb") as fh:
+                        fh.write(data)
+                except Exception as exc:
+                    _drop_error("写入失败: %s" % exc)
+                    return
+                finally:
+                    try:
+                        sftp.close()
+                    except Exception:
+                        pass
+                try:
+                    ws.send("\r\n\x1b[32m[已上传] %s（%d 字节）→ %s\x1b[0m\r\n"
+                            % (name, len(data), dest))
+                except Exception:
+                    pass
+
             while True:
                 try:
                     msg = ws.receive(timeout=0.05)
+                    if isinstance(msg, (bytes, bytearray)):
+                        if drop["name"] is not None:
+                            drop["buf"].extend(msg)
+                            if len(drop["buf"]) > DROP_MAX:
+                                _reset_drop()
+                                ws.send("\r\n\x1b[31m[上传失败] 文件超过 200MB\x1b[0m\r\n")
+                        continue
                     if msg:
+                        if msg.startswith("\x00{"):
+                            try:
+                                ctl = json.loads(msg[1:])
+                            except Exception:
+                                continue
+                            if ctl.get("t") == "drop-start":
+                                raw_name = str(ctl.get("name") or "upload").replace("\\", "/")
+                                drop["name"] = os.path.basename(raw_name) or "upload"
+                                drop["buf"] = bytearray()
+                            elif ctl.get("t") == "drop-end" and drop["name"] is not None:
+                                _finish_drop()
+                            continue
                         chan.send(msg)
                 except Exception:
                     break
