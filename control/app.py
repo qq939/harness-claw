@@ -3203,7 +3203,7 @@ def create_app(docker_client=None):
             <img class="img-preview" alt="待发送图片" title="待发送的图片（点右侧「移除图片」可取消）" style="display:none">
             <button class="img-remove" data-action="remove-image" style="display:none" title="移除待发送图片">移除图片</button>
           </div>
-          <pre id="log-${{item.container_name}}" class="log-view">${{item.logs || ""}}</pre>
+          <pre id="log-${{item.container_name}}" class="log-view"></pre>
           <iframe id="ssh-${{item.container_name}}" class="ssh-view" style="display:none; width:100%; height:400px; border:1px solid #ccc;" src="" allow="fullscreen"></iframe>
           </div>
         `;
@@ -3234,6 +3234,9 @@ def create_app(docker_client=None):
           }};
         }}
         const logBox = div.querySelector("pre");
+        // 日志按纯文本注入：卡片日志里常有 <title>/<meta> 等示例代码，
+        // 拼进 innerHTML 会被浏览器当标签解析，还会吞掉后面的 <iframe>（SSH 面板随之消失）。
+        logBox.textContent = item.logs || "";
         const sshIframe = div.querySelector("iframe");
         const sshBtn = div.querySelector('button[data-action="ssh"]');
         const cmdInput = div.querySelector('[data-role="cmd-input"]');
@@ -3743,6 +3746,27 @@ def create_app(docker_client=None):
           + ' · 输出 ' + (u.out || 0) + ' tokens">今日 ¥' + Number(item.today_cost).toFixed(2) + '</span>';
       }}
 
+      // handleCardExpand: 统一展开卡片 + 如果之前是折叠状态则重置状态灯
+      function handleCardExpand(card) {{
+        const wasCollapsed = card.classList.contains("collapsed");
+        card.classList.remove("collapsed");
+        const btn = card.querySelector('.collapse-btn');
+        if (btn) btn.textContent = '▼';
+        
+        if (wasCollapsed) {{
+          // 重新打开 → 清除 done 闪烁、重置状态灯为 idle
+          card.classList.remove("blink-card");
+          const light = card.querySelector('.status-light');
+          if (light) {{
+            light.className = 'status-light idle';
+          }}
+          const name = card.dataset.name;
+          if (name) {{
+            fetch(`/api/agents/${{encodeURIComponent(name)}}/reset-state`, {{ method: 'POST' }});
+          }}
+        }}
+      }}
+
       async function refreshCards() {{
         const res = await fetch(`/api/agents?tail=${{tail}}`, {{ cache: "no-store" }});
         const data = await res.json();
@@ -3894,26 +3918,6 @@ def create_app(docker_client=None):
         await refreshCards();
         setInterval(refreshCards, {poll_ms});
         
-        // handleCardExpand: 统一展开卡片 + 如果之前是折叠状态则重置状态灯
-        function handleCardExpand(card) {{
-          const wasCollapsed = card.classList.contains("collapsed");
-          card.classList.remove("collapsed");
-          const btn = card.querySelector('.collapse-btn');
-          if (btn) btn.textContent = '▼';
-          
-          if (wasCollapsed) {{
-            // 重新打开 → 清除 done 闪烁、重置状态灯为 idle
-            card.classList.remove("blink-card");
-            const light = card.querySelector('.status-light');
-            if (light) {{
-              light.className = 'status-light idle';
-            }}
-            const name = card.dataset.name;
-            if (name) {{
-              fetch(`/api/agents/${{encodeURIComponent(name)}}/reset-state`, {{ method: 'POST' }});
-            }}
-          }}
-        }}
         
         let tabIndex = 0;
         // 「刷新日志」按钮用 #card=<name> 记名：刷新后自动展开（并滚动到）那张卡片
