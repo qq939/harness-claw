@@ -2828,6 +2828,16 @@ def create_app(docker_client=None):
             return jsonify({"error": "unauthorized", "path": path}), 401
         return None
 
+    @app.after_request
+    def _no_store_panel_assets(resp):
+        # 面板脚本常改，别让浏览器缓存住旧版本
+        try:
+            if request.path.startswith("/static/ports.js"):
+                resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+                resp.headers["Pragma"] = "no-cache"
+        except Exception:
+            pass
+        return resp
     @app.get("/")
     def index():
         poll_ms = 5000
@@ -3083,7 +3093,7 @@ def create_app(docker_client=None):
       .status-other {{ color: var(--warn); }}
       .small {{ color: var(--muted); font-size: 11px; margin-left: 8px; }}
     </style>
-  <script src="/static/ports.js"></script>
+  <script src="/static/ports.js?v=2"></script>
 </head>
   <body>
     <header>

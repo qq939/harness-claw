@@ -24,6 +24,7 @@
 
   function build(container, state, onSaved) {
     var extras = (state.extra || []).slice();
+    var original = (state.extra || []).slice();
     var primary = state.primary || null;
 
     var overlay = el('div', '', {
@@ -91,17 +92,24 @@
     });
     var hint = el('div', '', { color: '#ff8f8f', fontSize: '12px', minHeight: '16px', marginBottom: '6px' });
 
-    addBtn.onclick = function () {
-      var v = input.value.trim().replace(/\s+/g, '');
-      if (!RE.test(v)) { hint.textContent = '格式不对，应为 容器端口:宿主机端口'; return; }
+    function accept(v) {
+      v = String(v || '').trim().replace(/\s+/g, '');
+      if (!v) return '';
+      if (!RE.test(v)) return '格式不对，应为 容器端口:宿主机端口';
       var parts = v.split(':');
-      if (parts[0] === String(state.service_port) && primary) { hint.textContent = '主端口 ' + state.service_port + ' 已存在，不能重复添加'; return; }
-      if (extras.indexOf(v) >= 0) { hint.textContent = '该映射已存在'; return; }
-      if (state.bindings && state.bindings.indexOf(v) >= 0) { hint.textContent = '该映射已在容器上，无需重复'; return; }
+      if (parts[0] === String(state.service_port) && primary) return '主端口 ' + state.service_port + ' 已存在，不能重复添加';
+      if (extras.indexOf(v) >= 0) return '该映射已存在';
+      if (state.bindings && state.bindings.indexOf(v) >= 0) return '该映射已在容器上，无需重复';
       extras.push(v);
       input.value = '';
       hint.textContent = '';
       render();
+      return '';
+    }
+
+    addBtn.onclick = function () {
+      var err = accept(input.value);
+      if (err) hint.textContent = err;
     };
     input.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); addBtn.onclick(); } };
     addRow.appendChild(input);
@@ -120,6 +128,16 @@
     });
     cancel.onclick = function () { document.body.removeChild(overlay); };
     save.onclick = function () {
+      // 输入框里还没点「添加」的，保存时自动收进来，避免"填了却没生效"
+      if (input.value.trim()) {
+        var autoErr = accept(input.value);
+        if (autoErr) { hint.textContent = autoErr; return; }
+      }
+      var unchanged = extras.length === original.length && extras.every(function (x, i) { return x === original[i]; });
+      if (unchanged && !input.value.trim()) {
+        document.body.removeChild(overlay);
+        return;
+      }
       save.disabled = true;
       save.textContent = '保存中…';
       api('/api/agents/' + encodeURIComponent(container) + '/ports', {
