@@ -2760,6 +2760,82 @@ def create_app(docker_client=None):
         except Exception:
             pass
 
+    def _frpc_restart():
+        """重启 frpc 让 frpc.ini 的改动真正生效（frpc 没有 admin/reload 配置）。"""
+        try:
+            client = docker_client_or_default()
+            container = client.containers.get("frpc")
+            before = ((getattr(container, "attrs", {}) or {}).get("State") or {}).get("StartedAt")
+            container.restart()
+            container.reload()
+            after = ((getattr(container, "attrs", {}) or {}).get("State") or {}).get("StartedAt")
+            print(f"[frpc] restarted (StartedAt {before} -> {after})", flush=True, file=sys.stderr)
+        except Exception as e:
+            print(f"[frpc] WARNING: restart failed: {e}", flush=True, file=sys.stderr)
+
+    def sync_extra_frpc_rules(old_host_ports, new_host_ports):
+        """按附加端口列表增删 [mac<port>] 规则，最后只重启一次 frpc。"""
+        old_set = {int(p) for p in (old_host_ports or [])}
+        new_set = {int(p) for p in (new_host_ports or [])}
+        cfg_path = resolve_frpc_config_path()
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            print(f"[frpc] WARNING: read {cfg_path} failed: {e}", flush=True, file=sys.stderr)
+            return
+
+        lines = content.splitlines()
+        changed = False
+
+        def section_bounds(lines, name):
+            for i, line in enumerate(lines):
+                if line.strip() == f"[{name}]":
+                    end = len(lines)
+                    for j in range(i + 1, len(lines)):
+                        if lines[j].lstrip().startswith("["):
+                            end = j
+                            break
+                    return i, end
+            return None, None
+
+        # 1) 删除不再需要的规则
+        for port in sorted(old_set - new_set):
+            s, e = section_bounds(lines, f"mac{port}")
+            if s is None:
+                continue
+            del lines[s:e]
+            changed = True
+            print(f"[frpc] removed rule mac{port}", flush=True, file=sys.stderr)
+
+        # 2) 补齐新增/缺失的规则
+        for port in sorted(new_set):
+            entry = [f"[mac{port}]", "type = tcp", "local_ip = 0.0.0.0",
+                     f"local_port = {port}", f"remote_port = {port}"]
+            s, e = section_bounds(lines, f"mac{port}")
+            if s is None:
+                while lines and not lines[-1].strip():
+                    lines.pop()
+                lines.extend([""] + entry)
+                changed = True
+                print(f"[frpc] added rule mac{port}", flush=True, file=sys.stderr)
+            else:
+                current = [l.strip() for l in lines[s:e] if l.strip()]
+                if current != entry:
+                    lines[s:e] = entry
+                    changed = True
+                    print(f"[frpc] rewrote rule mac{port}", flush=True, file=sys.stderr)
+
+        if not changed:
+            print("[frpc] extra port rules unchanged", flush=True, file=sys.stderr)
+            return
+        try:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines).rstrip("\n") + "\n")
+        except Exception as e:
+            print(f"[frpc] WARNING: write {cfg_path} failed: {e}", flush=True, file=sys.stderr)
+            return
+        _frpc_restart()
     @app.get("/api/agents/<path:name>/ports")
     def api_get_ports(name):
         """读取端口映射：主端口（8082:宿主）+ 附加端口（config/port.txt）+ 容器实际绑定。"""
@@ -2803,6 +2879,12 @@ def create_app(docker_client=None):
         for p in ports:
             if not _PORT_RE.match(str(p)):
                 return jsonify({"error": f"Invalid format: {p} (expected container_port:host_port)"}), 400
+        old_extra_hosts = []
+        for _p in _read_port_config(name):
+            try:
+                old_extra_hosts.append(int(str(_p).split(":")[1]))
+            except (ValueError, IndexError):
+                pass
         _write_port_config(name, [str(p) for p in ports])
         # 解析出 host_port 列表用于重建
         extra_ports = []
@@ -2810,6 +2892,11 @@ def create_app(docker_client=None):
             parts = str(p).split(":")
             if len(parts) == 2:
                 extra_ports.append({"container": int(parts[0]), "host": int(parts[1])})
+        # frp 规则跟着端口走：应用自己维护 frpc.ini 并重启 frpc，不要求人工改配置
+        try:
+            sync_extra_frpc_rules(old_extra_hosts, [p["host"] for p in extra_ports])
+        except Exception as e:
+            print(f"[frpc] WARNING: sync failed: {e}", flush=True, file=sys.stderr)
         try:
             recreate_agent(name)
         except Exception as e:
