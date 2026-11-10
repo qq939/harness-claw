@@ -573,68 +573,287 @@ def create_app(docker_client=None):
         # 兜底：两者都不存在时写入主目录（FRPC_PATH），后续由挂载决定是否生效。
         return os.path.join(FRPC_PATH, "frpc.ini")
 
-    def add_frpc_rule(port):
-        """确保 frpc.ini 里有 [mac<port>] 映射，并让 frpc **真正加载**它。
+    # ------------------------------------------------------------------
+    # frpc 规则管理（严谨版）
+    # 目标：frpc.ini 里 [mac<port>] 段始终等于「当前卡的端口映射」，且改动后
+    #      能确认 frps 真的接受了（日志里出现 start proxy success），失败自动回滚。
+    # 原则：
+    #   1) 只增删我们自己的 [mac<数字>] 段，绝不碰 [common] / [ssh] / 用户自定义段
+    #   2) 文件写入原子化（临时文件 + os.replace），并保留最近 5 份备份
+    #   3) 串行化（_FRPC_LOCK），避免并发保存互相覆盖
+    #   4) 一批改动只重启一次 frpc；重启后按端口验证，未生效则回滚并报错
+    #   5) 启动时对账：只补齐缺失规则，不自动删除（避免误删面板自身的 mac19080）
+    # ------------------------------------------------------------------
+    _FRPC_LOCK = threading.RLock()
+    _FRPC_RULE_RE = re.compile(r"^\[mac(\d{2,5})\]$")
 
-        踩过的坑（19095 就是）：以前只要发现 `[mac<port>]` 已存在就 `return`，
-        —— 连重启 frpc 都一起跳过了。但"配置里写了" ≠ "frps 上生效"：那条规则可能是
-        上一次写入后 frpc 没重启，或者端口被复用留下的**旧条目**。结果卡片在宿主机端口上
-        听得挺好（Docker 端口代理在 LISTEN），公网却直接被拒绝：frps 上根本没有这个端口的监听。
+    def _frpc_path():
+        return resolve_frpc_config_path()
 
-        现在：section 内容不一致就就地重写；**无论改没改都重启 frpc**（frpc.ini 里没有
-        admin/reload 配置，只能靠重启加载），并把重启前后的 StartedAt 打出来便于排查。
-        """
-        section = f"mac{port}"
-        entry_lines = [f"[{section}]", "type = tcp", "local_ip = 0.0.0.0",
-                       f"local_port = {port}", f"remote_port = {port}"]
-        cfg_path = resolve_frpc_config_path()
+    def _frpc_read():
+        with open(_frpc_path(), "r", encoding="utf-8") as f:
+            return f.read()
+
+    def _frpc_write_atomic(text):
+        path = _frpc_path()
+        d = os.path.dirname(path)
+        ts = time.strftime("%Y%m%d-%H%M%S")
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            lines = content.splitlines()
-
-            start = end = None
-            for i, line in enumerate(lines):
-                if line.strip() == f"[{section}]":
-                    start = i
-                    end = len(lines)
-                    for j in range(i + 1, len(lines)):
-                        if lines[j].lstrip().startswith("["):
-                            end = j
-                            break
-                    break
-
-            if start is None:
-                new_content = content.rstrip("\n") + "\n\n" + "\n".join(entry_lines) + "\n"
-                action = "added"
-            else:
-                current = [l.strip() for l in lines[start:end] if l.strip()]
-                if current != entry_lines:
-                    new_content = "\n".join(lines[:start] + entry_lines + lines[end:]).rstrip("\n") + "\n"
-                    action = "rewrote"
-                else:
-                    new_content = content
-                    action = "unchanged"
-
-            if action != "unchanged":
-                with open(cfg_path, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-            print(f"[frpc] rule for port {port}: {action}; restarting frpc so it takes effect...",
-                  flush=True, file=sys.stderr)
-
-            try:
-                client = docker_client_or_default()
-                container = client.containers.get("frpc")
-                before = ((getattr(container, "attrs", {}) or {}).get("State") or {}).get("StartedAt")
-                container.restart()
-                container.reload()
-                after = ((getattr(container, "attrs", {}) or {}).get("State") or {}).get("StartedAt")
-                print(f"[frpc] frpc restarted (StartedAt {before} -> {after})", flush=True, file=sys.stderr)
-            except Exception as re:
-                print(f"[frpc] WARNING: docker restart frpc failed: {re}", flush=True, file=sys.stderr)
+            if os.path.exists(path):
+                import shutil as _sh
+                _sh.copy2(path, f"{path}.bak-{ts}")
+                olds = sorted([f for f in os.listdir(d) if f.startswith(os.path.basename(path) + ".bak-")])
+                for old in olds[:-5]:
+                    try:
+                        os.remove(os.path.join(d, old))
+                    except OSError:
+                        pass
         except Exception as e:
-            print(f"[frpc] ERROR: {e}", flush=True, file=sys.stderr)
+            print(f"[frpc] WARNING: backup failed: {e}", flush=True, file=sys.stderr)
+        tmp = f"{path}.tmp-{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
 
+    def _frpc_rule_lines(port):
+        return [f"[mac{int(port)}]", "type = tcp", "local_ip = 0.0.0.0",
+                f"local_port = {int(port)}", f"remote_port = {int(port)}"]
+
+    def _frpc_section_bounds(lines, name):
+        for i, line in enumerate(lines):
+            if line.strip() == name:
+                end = len(lines)
+                for j in range(i + 1, len(lines)):
+                    if lines[j].lstrip().startswith("["):
+                        end = j
+                        break
+                return i, end
+        return None, None
+
+    def _frpc_existing_ports(text):
+        out = set()
+        for line in text.splitlines():
+            m = _FRPC_RULE_RE.match(line.strip())
+            if m:
+                out.add(int(m.group(1)))
+        return out
+
+    # ---------------- frpc 规则清单（appfrpc.ini，只记段标题） ----------------
+    # 文件里列出的 [xxx] 就是 app 写入/管理的段；未列出的段（[common]/[ssh] 等）属于 frpc.ini 原有，
+    # app 永不删改。首次接入时把已有的 [mac<port>] 段登记进来（视为 app 的命名约定）。
+    def _appfrpc_path():
+        return os.path.join(os.path.dirname(_frpc_path()), "appfrpc.ini")
+
+    _APPFRPC_HEADER = "# appfrpc.ini — control 自动维护：下列段由 app 管理，其余段为 frpc.ini 原有\n"
+
+    def appfrpc_load():
+        """返回 app 管理的段标题集合；文件不存在返回 None。"""
+        path = _appfrpc_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                out = set()
+                for line in f:
+                    s = line.strip()
+                    if s.startswith("[") and s.endswith("]"):
+                        out.add(s)
+                return out
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            print(f"[frpc] WARNING: read appfrpc.ini failed: {e}", flush=True, file=sys.stderr)
+            return None
+
+    def appfrpc_save(titles):
+        path = _appfrpc_path()
+        text = _APPFRPC_HEADER + "".join(f"{t}\n" for t in sorted(titles))
+        tmp = f"{path}.tmp-{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+
+    def _frpc_sections(text):
+        out = []
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                out.append(s)
+        return out
+
+    def appfrpc_bootstrap_if_needed():
+        """首次运行：把 frpc.ini 里已有的 [mac<port>] 段登记为 app 管理（其余不登记）。"""
+        titles = appfrpc_load()
+        if titles is not None:
+            return titles
+        try:
+            sections = _frpc_sections(_frpc_read())
+        except Exception as e:
+            print(f"[frpc] bootstrap: read frpc.ini failed: {e}", flush=True, file=sys.stderr)
+            return set()
+        titles = {s for s in sections if _FRPC_RULE_RE.match(s)}
+        try:
+            appfrpc_save(titles)
+            print(f"[frpc] bootstrap appfrpc.ini: {len(titles)} 个段归 app 管理", flush=True, file=sys.stderr)
+        except Exception as e:
+            print(f"[frpc] WARNING: write appfrpc.ini failed: {e}", flush=True, file=sys.stderr)
+        return titles
+
+    def appfrpc_add(section):
+        titles = appfrpc_bootstrap_if_needed() or set()
+        if section not in titles:
+            titles.add(section)
+            try:
+                appfrpc_save(titles)
+            except Exception as e:
+                print(f"[frpc] WARNING: add {section} failed: {e}", flush=True, file=sys.stderr)
+
+    def appfrpc_remove(section):
+        titles = appfrpc_bootstrap_if_needed() or set()
+        if section in titles:
+            titles.discard(section)
+            try:
+                appfrpc_save(titles)
+            except Exception as e:
+                print(f"[frpc] WARNING: remove {section} failed: {e}", flush=True, file=sys.stderr)
+
+    def _frpc_restart_verified(expected_ports, timeout=30):
+        """重启 frpc 并确认每个端口在日志里出现 start proxy success；返回 {port: ok}。"""
+        try:
+            client = docker_client_or_default()
+            container = client.containers.get("frpc")
+            container.restart()
+            container.reload()
+            print(f"[frpc] restarted, verifying {sorted(expected_ports)}", flush=True, file=sys.stderr)
+        except Exception as e:
+            print(f"[frpc] ERROR: restart failed: {e}", flush=True, file=sys.stderr)
+            return {p: False for p in expected_ports}
+
+        deadline = time.time() + timeout
+        confirmed = set()
+        last_log = ""
+        while time.time() < deadline and len(confirmed) < len(expected_ports):
+            time.sleep(1)
+            try:
+                res = container.exec_run(["tail", "-n", "400", "/var/log/frpc.log"])
+                last_log = (res.output or b"").decode("utf-8", "replace")
+            except Exception:
+                continue
+            for p in expected_ports:
+                if f"[mac{int(p)}] start proxy success" in last_log:
+                    confirmed.add(int(p))
+        ok = {int(p): (int(p) in confirmed) for p in expected_ports}
+        missing = [p for p, v in ok.items() if not v]
+        if missing:
+            print(f"[frpc] WARNING: not confirmed: {missing}; log tail:\n{last_log[-800:]}",
+                  flush=True, file=sys.stderr)
+        return ok
+
+    def frpc_sync(add_ports=None, remove_ports=None, reason=""):
+        """按需增删 [mac<port>] 规则；返回 {ok, added, removed, verified, failed}。"""
+        add = sorted({int(p) for p in (add_ports or [])})
+        rem = sorted({int(p) for p in (remove_ports or [])} - set(add))
+        result = {"ok": True, "added": [], "removed": [], "verified": True, "failed": []}
+        if not add and not rem:
+            return result
+        # 首次运行先登记现有段，保证「app 建的 / 原本就有的」可区分
+        appfrpc_bootstrap_if_needed()
+        with _FRPC_LOCK:
+            path = _frpc_path()
+            try:
+                original = _frpc_read()
+            except Exception as e:
+                print(f"[frpc] ERROR: read {path}: {e}", flush=True, file=sys.stderr)
+                result.update(ok=False, failed=add, verified=False)
+                return result
+            lines = original.splitlines()
+            changed = False
+            _managed = appfrpc_bootstrap_if_needed() or set()
+            for port in rem:
+                section = f"[mac{port}]"
+                if section not in _managed:
+                    print(f"[frpc] refuse to delete non-managed section {section}", flush=True, file=sys.stderr)
+                    continue
+                s, e = _frpc_section_bounds(lines, section)
+                if s is not None:
+                    del lines[s:e]
+                    changed = True
+                    result["removed"].append(port)
+                    appfrpc_remove(section)
+            for port in add:
+                entry = _frpc_rule_lines(port)
+                s, e = _frpc_section_bounds(lines, f"[mac{port}]")
+                if s is None:
+                    while lines and not lines[-1].strip():
+                        lines.pop()
+                    lines.extend([""] + entry)
+                    changed = True
+                    result["added"].append(port)
+                    appfrpc_add(f"[mac{port}]")
+                else:
+                    cur = [l.strip() for l in lines[s:e] if l.strip()]
+                    if cur != entry:
+                        lines[s:e] = entry
+                        changed = True
+                        result["added"].append(port)
+                        appfrpc_add(f"[mac{port}]")
+            if not changed:
+                print(f"[frpc] sync({reason}): no change", flush=True, file=sys.stderr)
+                return result
+            new_text = "\n".join(lines).rstrip("\n") + "\n"
+            try:
+                _frpc_write_atomic(new_text)
+            except Exception as e:
+                print(f"[frpc] ERROR: write failed: {e}", flush=True, file=sys.stderr)
+                result.update(ok=False, failed=add, verified=False)
+                return result
+            print(f"[frpc] sync({reason}): added={result['added']} removed={result['removed']}",
+                  flush=True, file=sys.stderr)
+            expected = sorted(set(add) | (set(rem) if False else set()))
+            # 只验证新增/改写的端口；删除的端口无法靠日志确认，靠 frpc 正常启动推断
+            ok_map = _frpc_restart_verified(expected) if expected else _frpc_restart_verified([])
+            failed = [p for p, v in ok_map.items() if not v]
+            if failed:
+                print(f"[frpc] rollback because {failed} not confirmed", flush=True, file=sys.stderr)
+                try:
+                    _frpc_write_atomic(original)
+                    _frpc_restart_verified([])
+                except Exception as e:
+                    print(f"[frpc] ERROR: rollback failed: {e}", flush=True, file=sys.stderr)
+                result.update(ok=False, verified=False, failed=failed)
+            return result
+
+    def frpc_reconcile(reason="startup"):
+        """对账：把当前所有卡片的宿主端口补进 frpc.ini（只补不删）。"""
+        try:
+            appfrpc_bootstrap_if_needed()
+            desired = set()
+            for c in display_containers():
+                hp = container_host_port(c)
+                if hp:
+                    desired.add(int(hp))
+                for item in _read_port_config(c.name):
+                    try:
+                        desired.add(int(str(item).split(":")[1]))
+                    except (ValueError, IndexError):
+                        continue
+            with _FRPC_LOCK:
+                try:
+                    existing = _frpc_existing_ports(_frpc_read())
+                except Exception as e:
+                    print(f"[frpc] reconcile: read failed: {e}", flush=True, file=sys.stderr)
+                    return {"ok": False}
+            missing = sorted(desired - existing)
+            if not missing:
+                print(f"[frpc] reconcile({reason}): all {len(desired)} rules present", flush=True, file=sys.stderr)
+                return {"ok": True, "added": []}
+            print(f"[frpc] reconcile({reason}): adding {missing}", flush=True, file=sys.stderr)
+            return frpc_sync(add_ports=missing, reason=f"reconcile:{reason}")
+        except Exception as e:
+            print(f"[frpc] reconcile error: {e}", flush=True, file=sys.stderr)
+            return {"ok": False}
+
+    def add_frpc_rule(port):
+        """兼容旧调用：确保某个宿主端口的 [mac<port>] 规则存在并生效。"""
+        return frpc_sync(add_ports=[port], reason=f"add:{port}")
     def _platform_public_keys():
         """平台公钥：config/ssh/authorized_keys，一行一个；# 开头的行忽略。"""
         path = os.path.join(app.config["CONFIG_ROOT"], "ssh", "authorized_keys")
@@ -2760,82 +2979,22 @@ def create_app(docker_client=None):
         except Exception:
             pass
 
-    def _frpc_restart():
-        """重启 frpc 让 frpc.ini 的改动真正生效（frpc 没有 admin/reload 配置）。"""
+    @app.get("/api/frpc/rules")
+    def api_frpc_rules():
+        """查看 appfrpc.ini（app 管理的段标题）与 frpc.ini 实际段的差异。"""
         try:
-            client = docker_client_or_default()
-            container = client.containers.get("frpc")
-            before = ((getattr(container, "attrs", {}) or {}).get("State") or {}).get("StartedAt")
-            container.restart()
-            container.reload()
-            after = ((getattr(container, "attrs", {}) or {}).get("State") or {}).get("StartedAt")
-            print(f"[frpc] restarted (StartedAt {before} -> {after})", flush=True, file=sys.stderr)
+            sections = _frpc_sections(_frpc_read())
         except Exception as e:
-            print(f"[frpc] WARNING: restart failed: {e}", flush=True, file=sys.stderr)
-
-    def sync_extra_frpc_rules(old_host_ports, new_host_ports):
-        """按附加端口列表增删 [mac<port>] 规则，最后只重启一次 frpc。"""
-        old_set = {int(p) for p in (old_host_ports or [])}
-        new_set = {int(p) for p in (new_host_ports or [])}
-        cfg_path = resolve_frpc_config_path()
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception as e:
-            print(f"[frpc] WARNING: read {cfg_path} failed: {e}", flush=True, file=sys.stderr)
-            return
-
-        lines = content.splitlines()
-        changed = False
-
-        def section_bounds(lines, name):
-            for i, line in enumerate(lines):
-                if line.strip() == f"[{name}]":
-                    end = len(lines)
-                    for j in range(i + 1, len(lines)):
-                        if lines[j].lstrip().startswith("["):
-                            end = j
-                            break
-                    return i, end
-            return None, None
-
-        # 1) 删除不再需要的规则
-        for port in sorted(old_set - new_set):
-            s, e = section_bounds(lines, f"mac{port}")
-            if s is None:
-                continue
-            del lines[s:e]
-            changed = True
-            print(f"[frpc] removed rule mac{port}", flush=True, file=sys.stderr)
-
-        # 2) 补齐新增/缺失的规则
-        for port in sorted(new_set):
-            entry = [f"[mac{port}]", "type = tcp", "local_ip = 0.0.0.0",
-                     f"local_port = {port}", f"remote_port = {port}"]
-            s, e = section_bounds(lines, f"mac{port}")
-            if s is None:
-                while lines and not lines[-1].strip():
-                    lines.pop()
-                lines.extend([""] + entry)
-                changed = True
-                print(f"[frpc] added rule mac{port}", flush=True, file=sys.stderr)
-            else:
-                current = [l.strip() for l in lines[s:e] if l.strip()]
-                if current != entry:
-                    lines[s:e] = entry
-                    changed = True
-                    print(f"[frpc] rewrote rule mac{port}", flush=True, file=sys.stderr)
-
-        if not changed:
-            print("[frpc] extra port rules unchanged", flush=True, file=sys.stderr)
-            return
-        try:
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines).rstrip("\n") + "\n")
-        except Exception as e:
-            print(f"[frpc] WARNING: write {cfg_path} failed: {e}", flush=True, file=sys.stderr)
-            return
-        _frpc_restart()
+            return jsonify({"ok": False, "error": str(e)}), 500
+        managed = appfrpc_bootstrap_if_needed() or set()
+        return jsonify({
+            "ok": True,
+            "manifest_path": _appfrpc_path(),
+            "app_managed": sorted(managed),
+            "frpc_sections": sections,
+            "external": [s for s in sections if s not in managed],
+            "missing_in_frpc": [s for s in sorted(managed) if s not in sections],
+        })
     @app.get("/api/agents/<path:name>/ports")
     def api_get_ports(name):
         """读取端口映射：主端口（8082:宿主）+ 附加端口（config/port.txt）+ 容器实际绑定。"""
@@ -2879,8 +3038,33 @@ def create_app(docker_client=None):
         for p in ports:
             if not _PORT_RE.match(str(p)):
                 return jsonify({"error": f"Invalid format: {p} (expected container_port:host_port)"}), 400
+        # 宿主端口不能被别的卡片占用，也不能和本卡主端口重复
+        _used = {}
+        for _c in display_containers():
+            if _c.name == name:
+                continue
+            _hp = container_host_port(_c)
+            if _hp:
+                _used[int(_hp)] = _c.name
+            for _item in _read_port_config(_c.name):
+                try:
+                    _used[int(str(_item).split(":")[1])] = _c.name
+                except (ValueError, IndexError):
+                    continue
+        _self_primary = container_host_port(_require_managed(name))
+        _seen = set()
+        for p in ports:
+            _hp = int(str(p).split(":")[1])
+            if _hp in _seen:
+                return jsonify({"error": f"重复的宿主端口: {_hp}"}), 400
+            _seen.add(_hp)
+            if _hp in _used:
+                return jsonify({"error": f"宿主端口 {_hp} 已被 {_used[_hp]} 占用"}), 400
+            if _self_primary and _hp == int(_self_primary):
+                return jsonify({"error": f"宿主端口 {_hp} 是本卡主端口，不能重复映射"}), 400
+        old_raw_ports = _read_port_config(name)
         old_extra_hosts = []
-        for _p in _read_port_config(name):
+        for _p in old_raw_ports:
             try:
                 old_extra_hosts.append(int(str(_p).split(":")[1]))
             except (ValueError, IndexError):
@@ -2892,11 +3076,18 @@ def create_app(docker_client=None):
             parts = str(p).split(":")
             if len(parts) == 2:
                 extra_ports.append({"container": int(parts[0]), "host": int(parts[1])})
-        # frp 规则跟着端口走：应用自己维护 frpc.ini 并重启 frpc，不要求人工改配置
-        try:
-            sync_extra_frpc_rules(old_extra_hosts, [p["host"] for p in extra_ports])
-        except Exception as e:
-            print(f"[frpc] WARNING: sync failed: {e}", flush=True, file=sys.stderr)
+        # frp 规则跟着端口走：只动 [mac<port>] 段，原子写 + 重启后验证，失败回滚
+        _new_hosts = [p["host"] for p in extra_ports]
+        _frp = frpc_sync(add_ports=[h for h in _new_hosts if h not in old_extra_hosts],
+                         remove_ports=[h for h in old_extra_hosts if h not in _new_hosts],
+                         reason=f"ports:{name}")
+        if not _frp.get("ok"):
+            try:
+                _write_port_config(name, old_raw_ports)
+            except Exception:
+                pass
+            return jsonify({"error": "frp 规则应用失败，已回滚端口配置",
+                            "frp": _frp}), 500
         try:
             recreate_agent(name)
         except Exception as e:
@@ -2915,6 +3106,20 @@ def create_app(docker_client=None):
             return jsonify({"error": "unauthorized", "path": path}), 401
         return None
 
+    @app.errorhandler(Exception)
+    def _api_error_as_json(e):
+        """所有 /api/* 的错误都用 JSON 返回，避免前端 JSON.parse 到 HTML 报 Unexpected token '<'。"""
+        from werkzeug.exceptions import HTTPException
+        is_http = isinstance(e, HTTPException)
+        code = e.code if is_http else 500
+        if request.path.startswith("/api/"):
+            detail = getattr(e, "description", None) or str(e) or type(e).__name__
+            print(f"[api-error] {request.method} {request.path} -> {code} {type(e).__name__}: {detail}",
+                  flush=True, file=sys.stderr)
+            return jsonify({"ok": False, "error": detail, "kind": type(e).__name__}), code
+        if is_http:
+            return e
+        return "Internal Server Error", 500
     @app.after_request
     def _no_store_panel_assets(resp):
         # 面板脚本常改，别让浏览器缓存住旧版本
@@ -3180,7 +3385,7 @@ def create_app(docker_client=None):
       .status-other {{ color: var(--warn); }}
       .small {{ color: var(--muted); font-size: 11px; margin-left: 8px; }}
     </style>
-  <script src="/static/ports.js?v=2"></script>
+  <script src="/static/ports.js?v=3"></script>
 </head>
   <body>
     <header>
@@ -4304,6 +4509,9 @@ def create_app(docker_client=None):
 
     usage_thread = threading.Thread(target=_usage_refresh_loop, daemon=True)
     usage_thread.start()
+
+    # 启动时对账 frpc 规则（只补不删，避免误删面板自身的 mac19080）
+    threading.Thread(target=frpc_reconcile, args=('startup',), daemon=True).start()
 
     return app
 

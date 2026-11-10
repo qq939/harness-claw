@@ -6,8 +6,15 @@
 
   function api(url, opts) {
     return fetch(url, opts).then(function (r) {
-      return r.json().then(function (d) {
-        if (!r.ok || (d && d.error)) throw new Error((d && d.error) || ('HTTP ' + r.status));
+      return r.text().then(function (txt) {
+        var d = null;
+        try { d = JSON.parse(txt); } catch (e) {}
+        if (!r.ok || (d && d.error)) {
+          var plain = String(txt || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+          var msg = (d && d.error) || ('HTTP ' + r.status + (plain ? '：' + plain : ''));
+          throw new Error(msg);
+        }
+        if (!d) throw new Error('响应不是 JSON：' + String(txt).slice(0, 160));
         return d;
       });
     });
