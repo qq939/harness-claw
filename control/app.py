@@ -2760,6 +2760,32 @@ def create_app(docker_client=None):
         except Exception:
             pass
 
+    @app.get("/api/agents/<path:name>/ports")
+    def api_get_ports(name):
+        """读取端口映射：主端口（8082:宿主）+ 附加端口（config/port.txt）+ 容器实际绑定。"""
+        try:
+            container = _require_managed(name)
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        except docker.errors.NotFound:
+            return jsonify({"error": "Container not found"}), 404
+        bindings = []
+        try:
+            raw = ((container.attrs or {}).get("HostConfig", {}) or {}).get("PortBindings", {}) or {}
+            for cport, lst in raw.items():
+                for b in (lst or []):
+                    if isinstance(b, dict) and b.get("HostPort"):
+                        bindings.append(f"{str(cport).split('/')[0]}:{b['HostPort']}")
+        except Exception:
+            pass
+        primary_host = container_host_port(container)
+        primary = None
+        if primary_host:
+            primary = {"container": SERVICE_PORT, "host": primary_host,
+                       "mapping": f"{SERVICE_PORT}:{primary_host}"}
+        return jsonify({"ok": True, "container": container.name, "service_port": SERVICE_PORT,
+                        "primary": primary, "extra": _read_port_config(container.name),
+                        "bindings": sorted(bindings)})
     @app.post("/api/agents/<path:name>/ports")
     def api_update_ports(name):
         """更新容器端口映射：写入 config/port.txt 并重建容器。"""
@@ -3057,7 +3083,8 @@ def create_app(docker_client=None):
       .status-other {{ color: var(--warn); }}
       .small {{ color: var(--muted); font-size: 11px; margin-left: 8px; }}
     </style>
-  </head>
+  <script src="/static/ports.js"></script>
+</head>
   <body>
     <header>
       <div class="wrap">
@@ -3579,25 +3606,11 @@ def create_app(docker_client=None):
 
         const portBtn = div.querySelector('.port-btn');
         if (portBtn) {{
-          portBtn.onclick = () => {{
-            const currentPorts = portBtn.dataset.ports || '';
-            const val = prompt('输入端口映射（格式：container_port:host_port，每行一个）：\\n' + (currentPorts ? '当前:\\n' + currentPorts + '\\n' : ''));
-            if (val === null) return;
-            if (!val.trim() && !currentPorts) return;
-            fetch(`/api/agents/${{encodeURIComponent(item.container_name)}}/ports`, {{
-              method: 'POST',
-              headers: {{ 'Content-Type': 'application/json' }},
-              body: JSON.stringify({{ ports: val.trim() ? val.trim().split(/\\r?\\n/).filter(l => l.trim()) : [] }}),
-            }}).then(r => r.json()).then(d => {{
-              if (d.error) {{
-                logBox.textContent += `\nERROR: ${{d.error}}\n`;
-              }} else {{
-                logBox.textContent += `\n[端口已更新] ${{d.mappings ? d.mappings.join(', ') : ''}} 容器重建中...\n`;
-              }}
-            }}).catch(e => {{ logBox.textContent += `\nERROR: ${{e}}\n`; }});
+          portBtn.onclick = (e) => {{
+            e.stopPropagation();
+            if (window.openPortModal) window.openPortModal(item.container_name);
           }};
         }}
-        
         const cardTitle = div.querySelector('.card-title');
         const gitSelect = div.querySelector('.git-select');
         const gitTools = div.querySelector('.git-tools');

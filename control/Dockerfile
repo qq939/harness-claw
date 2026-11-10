@@ -14,6 +14,7 @@ COPY control/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY control/app.py /app/app.py
+COPY control/static /app/static
 COPY tools/hub /app/tools/hub
 
 RUN ln -s /config /app/config
