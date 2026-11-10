@@ -302,3 +302,19 @@ remote_port = 19022
 - 输入 `容器端口:宿主机端口` 后点「添加」，再「保存并重建」→ 写 `workspaces/<卡片>/config/port.txt` 并重建容器
 - 接口：`GET /api/agents/<name>/ports`（读）、`POST /api/agents/<name>/ports`（`{"ports":["8080:19112"]}`，写 + 重建）
 - 要让新端口公网可达，还需在宿主机 `frp/frpc.ini` 加一条 `[19112] → remote_port=19112` 并重启 frpc
+### frp 规则归属（appfrpc.ini）
+
+`frp/frpc.ini` 旁边有一个 `appfrpc.ini`，只记录**段标题**：
+
+```ini
+# appfrpc.ini — control 自动维护：下列段由 app 管理，其余段为 frpc.ini 原有
+[harness-19080]
+[harness-19081]
+...
+```
+
+- 列在 `appfrpc.ini` 里的段 ← app 创建/管理（命名约定 `[harness-<宿主端口>]`），可增删改
+- 不在里面的段（`[common]`、`[ssh]` 等）← frpc.ini 原有，app 只读，删除请求会被拒绝
+- 旧命名 `[mac<端口>]` 会在下次同步时自动迁移成 `[harness-<端口>]`
+- 查询：`GET /api/frpc/rules` → `{app_managed, external, missing_in_frpc}`
+- 写入：原子替换 + 保留 5 份备份；重启后按端口验证 `start proxy success`，未生效自动回滚

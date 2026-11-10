@@ -585,7 +585,7 @@ def create_app(docker_client=None):
     #   5) 启动时对账：只补齐缺失规则，不自动删除（避免误删面板自身的 mac19080）
     # ------------------------------------------------------------------
     _FRPC_LOCK = threading.RLock()
-    _FRPC_RULE_RE = re.compile(r"^\[mac(\d{2,5})\]$")
+    _FRPC_RULE_RE = re.compile(r"^\[(?:harness-|mac)(\d{2,5})\]$")
 
     def _frpc_path():
         return resolve_frpc_config_path()
@@ -615,8 +615,12 @@ def create_app(docker_client=None):
             f.write(text)
         os.replace(tmp, path)
 
+    def _frpc_section(port):
+        """新约定：harness-<port>（旧命名 mac<port> 会被自动迁移）"""
+        return f"[harness-{int(port)}]"
+
     def _frpc_rule_lines(port):
-        return [f"[mac{int(port)}]", "type = tcp", "local_ip = 0.0.0.0",
+        return [_frpc_section(port), "type = tcp", "local_ip = 0.0.0.0",
                 f"local_port = {int(port)}", f"remote_port = {int(port)}"]
 
     def _frpc_section_bounds(lines, name):
@@ -630,12 +634,17 @@ def create_app(docker_client=None):
                 return i, end
         return None, None
 
-    def _frpc_existing_ports(text):
+    def _frpc_existing_ports(text, new_style_only=False):
+        """从 frpc.ini 里解析端口；new_style_only=True 时忽略旧命名 [mac<port>]。"""
         out = set()
         for line in text.splitlines():
-            m = _FRPC_RULE_RE.match(line.strip())
-            if m:
-                out.add(int(m.group(1)))
+            s = line.strip()
+            m = _FRPC_RULE_RE.match(s)
+            if not m:
+                continue
+            if new_style_only and s.startswith("[mac"):
+                continue
+            out.add(int(m.group(1)))
         return out
 
     # ---------------- frpc 规则清单（appfrpc.ini，只记段标题） ----------------
@@ -738,7 +747,7 @@ def create_app(docker_client=None):
             except Exception:
                 continue
             for p in expected_ports:
-                if f"[mac{int(p)}] start proxy success" in last_log:
+                if f"{_frpc_section(p)} start proxy success" in last_log:
                     confirmed.add(int(p))
         ok = {int(p): (int(p) in confirmed) for p in expected_ports}
         missing = [p for p, v in ok.items() if not v]
@@ -768,7 +777,7 @@ def create_app(docker_client=None):
             changed = False
             _managed = appfrpc_bootstrap_if_needed() or set()
             for port in rem:
-                section = f"[mac{port}]"
+                section = _frpc_section(port)
                 if section not in _managed:
                     print(f"[frpc] refuse to delete non-managed section {section}", flush=True, file=sys.stderr)
                     continue
@@ -778,23 +787,35 @@ def create_app(docker_client=None):
                     changed = True
                     result["removed"].append(port)
                     appfrpc_remove(section)
+                ls, le = _frpc_section_bounds(lines, f"[mac{port}]")
+                if ls is not None:
+                    del lines[ls:le]
+                    changed = True
+                    appfrpc_remove(f"[mac{port}]")
             for port in add:
                 entry = _frpc_rule_lines(port)
-                s, e = _frpc_section_bounds(lines, f"[mac{port}]")
+                s, e = _frpc_section_bounds(lines, _frpc_section(port))
                 if s is None:
                     while lines and not lines[-1].strip():
                         lines.pop()
                     lines.extend([""] + entry)
                     changed = True
                     result["added"].append(port)
-                    appfrpc_add(f"[mac{port}]")
+                    appfrpc_add(_frpc_section(port))
+                    # 迁移：删掉旧的 [mac<port>] 段
+                    ls, le = _frpc_section_bounds(lines, f"[mac{port}]")
+                    if ls is not None:
+                        del lines[ls:le]
+                        appfrpc_remove(f"[mac{port}]")
+                        print(f"[frpc] migrated legacy [mac{port}] -> {_frpc_section(port)}",
+                              flush=True, file=sys.stderr)
                 else:
                     cur = [l.strip() for l in lines[s:e] if l.strip()]
                     if cur != entry:
                         lines[s:e] = entry
                         changed = True
                         result["added"].append(port)
-                        appfrpc_add(f"[mac{port}]")
+                        appfrpc_add(_frpc_section(port))
             if not changed:
                 print(f"[frpc] sync({reason}): no change", flush=True, file=sys.stderr)
                 return result
@@ -826,6 +847,15 @@ def create_app(docker_client=None):
         try:
             appfrpc_bootstrap_if_needed()
             desired = set()
+            # 控制面板自己的端口也要纳入管理（display_containers 里不含 control 自身）
+            try:
+                self_c = docker_client_or_default().containers.get("hermit-control-19080")
+                for _cport, _lst in (((self_c.attrs or {}).get("HostConfig") or {}).get("PortBindings") or {}).items():
+                    for _b in (_lst or []):
+                        if isinstance(_b, dict) and _b.get("HostPort"):
+                            desired.add(int(_b["HostPort"]))
+            except Exception as _e:
+                print(f"[frpc] reconcile: self port detect failed: {_e}", flush=True, file=sys.stderr)
             for c in display_containers():
                 hp = container_host_port(c)
                 if hp:
@@ -837,7 +867,7 @@ def create_app(docker_client=None):
                         continue
             with _FRPC_LOCK:
                 try:
-                    existing = _frpc_existing_ports(_frpc_read())
+                    existing = _frpc_existing_ports(_frpc_read(), new_style_only=True)
                 except Exception as e:
                     print(f"[frpc] reconcile: read failed: {e}", flush=True, file=sys.stderr)
                     return {"ok": False}
