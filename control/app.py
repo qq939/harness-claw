@@ -3025,6 +3025,48 @@ def create_app(docker_client=None):
             "external": [s for s in sections if s not in managed],
             "missing_in_frpc": [s for s in sorted(managed) if s not in sections],
         })
+    # ---------------- 端口变更任务（异步，避免 nginx 超时 502） ----------------
+    _PORT_JOBS = {}
+    _PORT_JOBS_LOCK = threading.Lock()
+
+    def _job_set(name, **kw):
+        with _PORT_JOBS_LOCK:
+            job = _PORT_JOBS.setdefault(name, {"steps": []})
+            steps = kw.pop("step", None)
+            if steps:
+                job.setdefault("steps", []).append(steps)
+            job.update(kw)
+            job["updated"] = time.time()
+            return dict(job)
+
+    def _job_get(name):
+        with _PORT_JOBS_LOCK:
+            job = _PORT_JOBS.get(name)
+            return dict(job) if job else None
+
+    def _apply_ports_job(name, old_raw_ports, old_hosts, new_hosts):
+        """后台执行：frp 规则同步 → 容器重建；失败回滚 port.txt。"""
+        try:
+            frp = frpc_sync(add_ports=[h for h in new_hosts if h not in old_hosts],
+                            remove_ports=[h for h in old_hosts if h not in new_hosts],
+                            reason=f"ports:{name}")
+            _job_set(name, frp=frp,
+                     step=f"frpc: +{frp.get('added')} -{frp.get('removed')} ok={frp.get('ok')}")
+            if not frp.get("ok"):
+                try:
+                    _write_port_config(name, old_raw_ports)
+                except Exception:
+                    pass
+                _job_set(name, status="error", finished=time.time(),
+                         error=f"frp 规则应用失败，已回滚端口配置（{frp.get('failed')}）")
+                return
+            _job_set(name, step="重建容器…")
+            recreate_agent(name)
+            _job_set(name, status="done", finished=time.time(), step="容器已重建")
+            print(f"[ports] job done for {name}: {new_hosts}", flush=True, file=sys.stderr)
+        except Exception as e:
+            _job_set(name, status="error", finished=time.time(), error=str(e))
+            print(f"[ports] job failed for {name}: {e}", flush=True, file=sys.stderr)
     @app.get("/api/agents/<path:name>/ports")
     def api_get_ports(name):
         """读取端口映射：主端口（8082:宿主）+ 附加端口（config/port.txt）+ 容器实际绑定。"""
@@ -3033,6 +3075,12 @@ def create_app(docker_client=None):
         except PermissionError as e:
             return jsonify({"error": str(e)}), 403
         except docker.errors.NotFound:
+            # 重建窗口内容器短暂不存在：有任务就返回任务状态，别让前端轮询报 404
+            job = _job_get(name)
+            if job:
+                return jsonify({"ok": True, "container": name, "service_port": SERVICE_PORT,
+                                "primary": None, "extra": _read_port_config(name),
+                                "bindings": [], "job": job, "recreating": True})
             return jsonify({"error": "Container not found"}), 404
         bindings = []
         try:
@@ -3048,7 +3096,7 @@ def create_app(docker_client=None):
         if primary_host:
             primary = {"container": SERVICE_PORT, "host": primary_host,
                        "mapping": f"{SERVICE_PORT}:{primary_host}"}
-        return jsonify({"ok": True, "container": container.name, "service_port": SERVICE_PORT,
+        return jsonify({"ok": True, "container": container.name, "service_port": SERVICE_PORT, "job": _job_get(container.name),
                         "primary": primary, "extra": _read_port_config(container.name),
                         "bindings": sorted(bindings)})
     @app.post("/api/agents/<path:name>/ports")
@@ -3106,24 +3154,15 @@ def create_app(docker_client=None):
             parts = str(p).split(":")
             if len(parts) == 2:
                 extra_ports.append({"container": int(parts[0]), "host": int(parts[1])})
-        # frp 规则跟着端口走：只动 [mac<port>] 段，原子写 + 重启后验证，失败回滚
         _new_hosts = [p["host"] for p in extra_ports]
-        _frp = frpc_sync(add_ports=[h for h in _new_hosts if h not in old_extra_hosts],
-                         remove_ports=[h for h in old_extra_hosts if h not in _new_hosts],
-                         reason=f"ports:{name}")
-        if not _frp.get("ok"):
-            try:
-                _write_port_config(name, old_raw_ports)
-            except Exception:
-                pass
-            return jsonify({"error": "frp 规则应用失败，已回滚端口配置",
-                            "frp": _frp}), 500
-        try:
-            recreate_agent(name)
-        except Exception as e:
-            return jsonify({"error": f"Recreate failed: {e}"}), 500
-        return jsonify({"ok": True, "mappings": [f"{p['container']}:{p['host']}" for p in extra_ports]})
-
+        _job_set(name, status="running", error=None, started=time.time(), finished=None,
+                 frp=None, step="已写入端口配置")
+        threading.Thread(target=_apply_ports_job,
+                         args=(name, old_raw_ports, old_extra_hosts, _new_hosts),
+                         daemon=True).start()
+        return jsonify({"ok": True, "accepted": True,
+                        "mappings": [f"{p['container']}:{p['host']}" for p in extra_ports],
+                        "job": _job_get(name)}), 202
     @app.before_request
     def _ws_token_guard():
         """WebSocket 接口必须带 token：在握手之前就拦掉（否则会先回 101 再被踢）。
@@ -3415,7 +3454,7 @@ def create_app(docker_client=None):
       .status-other {{ color: var(--warn); }}
       .small {{ color: var(--muted); font-size: 11px; margin-left: 8px; }}
     </style>
-  <script src="/static/ports.js?v=3"></script>
+  <script src="/static/ports.js?v=4"></script>
 </head>
   <body>
     <header>

@@ -134,6 +134,44 @@
       borderRadius: '8px', padding: '7px 16px', cursor: 'pointer', fontWeight: '600',
     });
     cancel.onclick = function () { document.body.removeChild(overlay); };
+    function showTip(text, ok) {
+      var tip = el('div', text, {
+        position: 'fixed', right: '18px', bottom: '18px',
+        background: ok ? '#16233a' : '#2a1518', color: ok ? '#cfe7ff' : '#ff8f8f',
+        border: '1px solid ' + (ok ? '#2b3d5c' : '#4a2026'), borderRadius: '8px',
+        padding: '10px 14px', zIndex: '100000', font: '13px system-ui, sans-serif', maxWidth: '60vw',
+      });
+      document.body.appendChild(tip);
+      return tip;
+    }
+
+    function pollJob(container, tip) {
+      var started = Date.now();
+      var tick = function () {
+        api('/api/agents/' + encodeURIComponent(container) + '/ports').then(function (st) {
+          var job = st.job || {};
+          if (job.status === 'done') {
+            tip.textContent = '✔ 端口已生效：' + ((st.extra || []).join('  ') || '（无附加端口）') + '，容器已重建';
+            setTimeout(function () { location.reload(); }, 1200);
+            return;
+          }
+          if (job.status === 'error') {
+            tip.textContent = '✘ 应用失败：' + (job.error || '未知错误');
+            tip.style.background = '#2a1518';
+            tip.style.color = '#ff8f8f';
+            return;
+          }
+          var steps = job.steps || [];
+          tip.textContent = '应用中… ' + (steps.length ? steps[steps.length - 1] : '') +
+            ' (' + Math.round((Date.now() - started) / 1000) + 's)';
+          setTimeout(tick, 1500);
+        }).catch(function (e) {
+          tip.textContent = '查询状态失败：' + e.message;
+        });
+      };
+      setTimeout(tick, 1200);
+    }
+
     save.onclick = function () {
       // 输入框里还没点「添加」的，保存时自动收进来，避免"填了却没生效"
       if (input.value.trim()) {
@@ -146,7 +184,7 @@
         return;
       }
       save.disabled = true;
-      save.textContent = '保存中…';
+      save.textContent = '提交中…';
       api('/api/agents/' + encodeURIComponent(container) + '/ports', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -154,13 +192,9 @@
       }).then(function (d) {
         document.body.removeChild(overlay);
         if (onSaved) onSaved(d);
-        var tip = el('div', '端口已更新：' + ((d.mappings || []).join('  ') || '（无附加端口）') + '，容器重建中…', {
-          position: 'fixed', right: '18px', bottom: '18px', background: '#16233a', color: '#cfe7ff',
-          border: '1px solid #2b3d5c', borderRadius: '8px', padding: '10px 14px', zIndex: '100000',
-          font: '13px system-ui, sans-serif',
-        });
-        document.body.appendChild(tip);
-        setTimeout(function () { location.reload(); }, 1500);
+        // 后台任务：立刻返回，进度靠轮询 GET，避免长请求被 nginx 502
+        var tip = showTip('已提交，正在应用端口变更…', true);
+        pollJob(container, tip);
       }).catch(function (e) {
         save.disabled = false;
         save.textContent = '保存并重建';
