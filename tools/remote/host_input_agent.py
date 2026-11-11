@@ -7,7 +7,8 @@
     schtasks /run /tn HermitRemoteInput      # 任务类型：仅在用户登录时运行，session 1
 
 协议（管道内，multiprocessing.connection 自动带长度前缀）：
-    {"t":"m","dx":12,"dy":-3}        相对移动
+    {"t":"m","dx":12,"dy":-3}        相对移动（走 SendInput，受系统指针加速影响）
+    {"t":"mr","dx":12,"dy":-3}       相对移动（GetCursorPos+SetCursorPos，绕开指针加速，1:1 精确）
     {"t":"c","b":"l|r|m","d":1|0}    鼠标按键 down/up
     {"t":"w","d":120,"h":0}          滚轮（120 = 一格）
     {"t":"k","vk":65,"d":1|0}        键盘 down/up（vk 为 Windows 虚拟键码）
@@ -146,6 +147,14 @@ def handle(ev):
         dy = int(ev.get("dy", 0))
         if dx or dy:
             _mouse(MOUSEEVENTF_MOVE, dx, dy)
+    elif t == "mr":
+        # 绝对定位式相对位移：不受“提高指针精确度”曲线影响，小位移也是 1:1
+        dx = int(ev.get("dx", 0))
+        dy = int(ev.get("dy", 0))
+        if dx or dy:
+            p = wintypes.POINT()
+            if user32.GetCursorPos(ctypes.byref(p)):
+                user32.SetCursorPos(p.x + dx, p.y + dy)
     elif t == "c":
         b = ev.get("b", "l")
         down = bool(ev.get("d"))
