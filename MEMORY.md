@@ -87,3 +87,17 @@ bc7cbd3 fix(video): AirPlay 改走原生控制条
   LAN 上没有开 5555，无法 adb 远程改配置；`116:8080` 是 Android Debug Database 页面，不是 adb。
 - ocs-tv App 的服务器地址存在 SharedPreferences，只能遥控器 MENU 里改；换机/换域名要手动切一次。
 - TV 端可观测性：`GET /api/cast/status` 的 `tv_online/age` 就是「电视现在连的是哪台服务器」的探针。
+
+## 投屏 v1.4：电视上报地址，服务器直推（2026-11-13）
+
+旧模型只有单行道：电视每 3 秒轮询「它配置的那一台」服务器，所以手机在别的实例上点投屏永远够不着它
+（`tv_online=false`，按钮只能藏起来）。用户原话：「电视上的传送他自己的一个局域网地址就行了」。
+
+- App 侧：`TvHttpServer`（18099 端口，`/ping`、`/play`、`/stop`）+ `Announcer`（每 10 秒上报 `{ip,port,name}`
+  给当前服务器和内置默认 `ocs.dimond.top`）；`PlayerActivity.finishAll` 支撑 `/stop`。
+- 服务端：`POST /api/tv/announce`、`GET /api/tv/presence`；`/api/cast` 有登记就直接
+  `POST http://<ip>:18099/play?file=&base=&seq=`，`pushed` 只代表电视收到了，播起来才算数（仍看 ack）。
+- 真机验证（小米 MIX Flip 装 1.4 当电视）：`/ping` → `192.168.0.107:18099`；从 ocs 推 → `acked=3`；
+  从 `192.168.0.202` 推同一台（它轮询的是 ocs）→ `acked=2`，说明确实不依赖轮询。
+- 极米（192.168.0.116）还装着 1.3，需要装一次 `ocstv.apk` 才有接收端；装完就不用再改它的服务器地址。
+- 模拟器/手机通过 ADB 安装时，MIUI 会弹「USB 安装提示」，必须 `input tap` 点「继续安装」，7 秒不点自动拒绝。
