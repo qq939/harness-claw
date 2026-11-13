@@ -33,6 +33,7 @@ import java.util.Map;
 final class TvHttpServer {
 
     static final int PORT = 18099;
+    private static final String VER = "1.6";
     private static final String TAG = "ocs-tv";
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
@@ -151,8 +152,8 @@ final class TvHttpServer {
             Map<String, String> params = parseQuery(query);
 
             if ("/ping".equals(path)) {
-                respond(sock, 200, "{\"app\":\"ocs-tv\",\"name\":\"" + escapeJson(Build.MODEL) + "\""
-                        + ",\"ip\":\"" + Announcer.localIpv4() + "\",\"port\":" + PORT + "}");
+                respond(sock, 200, "{\"app\":\"ocs-tv\",\"ver\":\"" + VER + "\",\"name\":\"" + escapeJson(Build.MODEL) + "\""
+                        + ",\"ip\":\"" + localIpv4() + "\",\"port\":" + PORT + "}");
                 return;
             }
             if ("/play".equals(path) && "POST".equalsIgnoreCase(method)) {
@@ -287,8 +288,46 @@ final class TvHttpServer {
         return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
-    static String encodePath(String p) {
-        String[] parts = p.split("/");
+    /**
+     * 本机的局域网 IPv4，随 /ping 一起报给服务器（服务器据此把地址显示/记录下来）。
+     * 优先真实网卡，避开回环、169.254 和 VPN 虚拟网卡；取不到就返回空串。
+     */
+    static String localIpv4() {
+        try {
+            String fallback = null;
+            java.util.Enumeration<java.net.NetworkInterface> nics =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (nics != null && nics.hasMoreElements()) {
+                java.net.NetworkInterface nic = nics.nextElement();
+                if (!nic.isUp() || nic.isLoopback()) {
+                    continue;
+                }
+                String name = nic.getName() == null ? "" : nic.getName().toLowerCase();
+                java.util.Enumeration<java.net.InetAddress> addrs = nic.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    java.net.InetAddress a = addrs.nextElement();
+                    if (!(a instanceof java.net.Inet4Address) || a.isLoopbackAddress()) {
+                        continue;
+                    }
+                    String ip = a.getHostAddress();
+                    if (ip.startsWith("169.254.")) {
+                        continue;
+                    }
+                    if (name.startsWith("wlan") || name.startsWith("eth")) {
+                        return ip;
+                    }
+                    if (fallback == null) {
+                        fallback = ip;
+                    }
+                }
+            }
+            return fallback == null ? "" : fallback;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    static String encodePath(String p) {        String[] parts = p.split("/");
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < parts.length; i++) {
             if (i > 0) {

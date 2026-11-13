@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.harness.ocs.tv"
-    android:versionCode="6"
-    android:versionName="1.5">
+    android:versionCode="7"
+    android:versionName="1.6">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 电视上直接点「TV版」升级：Android 8+ 需要声明，运行时还要用户允许一次 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- 电视：要能装到没有触摸屏、没有 leanback 的设备上 -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -55,5 +57,12 @@
             android:exported="false"
             android:theme="@android:style/Theme.Material.Dialog.NoActionBar"
             android:screenOrientation="landscape" />
+
+        <!-- 自更新：下载好的 APK 通过 content:// 交给系统安装器（Android 7+ 不允许 file:// 直传） -->
+        <provider
+            android:name=".ApkProvider"
+            android:authorities="com.harness.ocs.tv.apk"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

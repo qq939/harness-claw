@@ -62,13 +62,12 @@ public class TvActivity extends Activity {
         setContentView(root);
 
         loadedBase = baseUrl();
-        installWebView(loadedBase);
-        // 手机在 OCS 里点「投屏」后，电视自己拉流播放（轮询 /api/cast/current）
+        installWebView(loadedBase);        // 手机在 OCS 里点「投屏」后，电视自己拉流播放（轮询 /api/cast/current）
         CastPoller.start(this, loadedBase);
-        // 同时把自己的局域网地址报到服务器：之后任意一台 OCS 都能直接把指令推过来，
-        // 不用再管电视里存的是哪个域名（轮询通道只能指挥「正连着自己的那一台」）。
+        // 常驻接收端：服务器按需探测这个端口判断在线，并直接推 /play 过来。
+        // 启动时报一次地址（只一次，不是心跳）——之后待机零流量。
         TvHttpServer.start(this);
-        Announcer.start(this, loadedBase);
+        Announcer.announceOnce(this, loadedBase, "启动");
     }
 
     @Override
@@ -81,7 +80,6 @@ public class TvActivity extends Activity {
             loadedBase = now;
             web.loadUrl(now);
         }
-        Announcer.setBase(now);
     }
 
     private void hideSystemUi() {
@@ -158,6 +156,21 @@ public class TvActivity extends Activity {
         });
 
         w.setWebChromeClient(new WebChromeClient());
+
+        // WebView 默认不处理下载：首页右上角「TV版」是 .apk 链接，没有这个监听器点了完全没反应。
+        // 自己下载 + 交给系统安装器（见 UpdateInstaller），这样电视上可以直接升级。
+        w.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+            if (url == null) return;
+            if (UpdateInstaller.looksLikeApk(url)) {
+                UpdateInstaller.downloadAndInstall(this, url);
+            } else {
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                } catch (Exception ignored) {
+                    toast("这台设备打不开这个链接");
+                }
+            }
+        });
     }
 
     /** 拦截导航：/video 走原生列表，视频文件走原生播放器，其余留给 WebView */
@@ -316,7 +329,6 @@ public class TvActivity extends Activity {
     @Override
     protected void onDestroy() {
         CastPoller.stop();
-        Announcer.stop();
         TvHttpServer.stop();
         if (web != null) {
             root.removeView(web);
