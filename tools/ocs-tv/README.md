@@ -13,7 +13,7 @@
 | 操作 | 手指 | **遥控器**：方向键 / OK / 返回 / 菜单 |
 | 视频播放 | WebView 内播 | **原生播放器**（极米 M1 等投影仪 WebView 解码弱，会崩渲染进程） |
 | 字号 | 100% | 130%（沙发距离看得清） |
-| 默认服务器 | `https://ocs.dimond.top` | `http://oas.dimond.top` |
+| 默认服务器 | `https://ocs.dimond.top` | `https://ocs.dimond.top` |
 | 分享接收 | 有（SEND / SEND_MULTIPLE） | 无（电视一般不用分享） |
 
 ## 遥控器映射（`shim.js`，注入到页面里）
@@ -35,14 +35,46 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/ocs-tv/build.ps1
 
 ## 发布
 
-放到 OCS/oas 的 upload 目录 `ocstv.apk`，首页右上角（设置齿轮左边）会自动多出一个「TV版」链接；
-没有这个文件就不显示。当前放在 **oas**：
+放到 OCS 的 upload 目录 `ocstv.apk`，首页右上角（设置齿轮左边）会自动多出一个「TV版」链接；
+没有这个文件就不显示。三处都放同一份：
 
-- `https://oas.dimond.top/ocstv.apk`
-- `http://192.168.0.202/ocstv.apk`
-- `http://8.130.124.108:5080/ocstv.apk`
+- `https://ocs.dimond.top/ocstv.apk`
+- `http://192.168.0.201/ocstv.apk`
+- `http://oas.dimond.top/ocstv.apk`（= `192.168.0.202`）
 
-## 视频不走 WebView（v1.2）`n`n极米 M1 这类投影仪 WebView 解码能力弱，点标题进 `/video`、或点列表里的视频文件都会让渲染进程崩溃（表现为闪退）。`n`nv1.2 起 WebView 只负责文件列表：`n`n- 点标题（`/video`）→ 原生视频列表 `VideoListActivity`（拉 `/videos` 接口，遥控器上下选、OK 播）`n- 点视频文件 / `/preview/<视频>` → 原生播放器 `PlayerActivity`（`VideoView`，OK 播放暂停、左右快退快进 10s、返回退出）`n- 播放失败会提示「这台设备播不了这个格式」，不再影响页面`n`n## 301 跳转（v1.3）`n`n站点默认地址是 `http://`，nginx 会 301 到 https。原生取列表/播放都不一定自动跟随：`n`n- `VideoListActivity` 手动跟 301/302/303/307/308（最多 5 跳）`n- `PlayerActivity` 对非 IP/localhost 的 `http://` 直接升级成 `https://`，播放失败还会换协议重试一次`n`n## 崩溃处理（v1.1）
+## 视频不走 WebView（v1.2）
+
+极米 M1 这类投影仪 WebView 解码能力弱，点标题进 `/video`、或点列表里的视频文件都会让渲染进程崩溃（表现为闪退）。
+
+v1.2 起 WebView 只负责文件列表：
+
+- 点标题（`/video`）→ 原生视频列表 `VideoListActivity`（拉 `/videos` 接口，遥控器上下选、OK 播）
+- 点视频文件 / `/preview/<视频>` → 原生播放器 `PlayerActivity`（`VideoView`，OK 播放暂停、左右快退快进 10s、返回退出）
+- 播放失败会提示「这台设备播不了这个格式」，不再影响页面
+
+## 301 跳转（v1.3）
+
+站点默认地址是 `http://`，nginx 会 301 到 https。原生取列表/播放都不一定自动跟随：
+
+- `VideoListActivity` 手动跟 301/302/303/307/308（最多 5 跳）
+- `PlayerActivity` 对非 IP/localhost 的 `http://` 直接升级成 `https://`，播放失败还会换协议重试一次
+
+## 上报局域网地址，服务器直接推（v1.4）
+
+v1.3 及以前只有一条路：电视每 3 秒去问**它配置的那一台**服务器「有要播的吗」。所以换域名、换实例，
+都得到电视上按菜单键改地址——投屏能力和「电视连的是谁」绑死了。
+
+v1.4 改成双向：
+
+- 电视在 `18099` 端口常驻一个最小 HTTP 服务：`GET /ping` 报身份，`POST /play?file=&base=&seq=` 播片，`POST /stop` 退出
+- 每 10 秒把自己的**局域网地址**上报给服务器（当前配置的那台 + 内置默认 `ocs.dimond.top`），`POST /api/tv/announce`
+- 服务器记住这份地址，手机点「投屏」时直接 `POST http://<电视IP>:18099/play`，不必等它轮询，
+  也不再要求「手机用的那台 = 电视连的那台」
+- 回执仍然是播放器 `onPrepared` 时的 `/api/cast/ack`：推过去只代表电视收到了指令，真播起来才显示「已投屏」
+
+代价：电视和服务器之间必须有 IP 可达（同网段，或服务器能路由到电视的局域网地址）。
+
+## 崩溃处理（v1.1）
 
 点首页标题会跳到 /video 视频页，电视上的 WebView 渲染进程容易在这类重页面上崩（内存小 / 解码不支持）。
 

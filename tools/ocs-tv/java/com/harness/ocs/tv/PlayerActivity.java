@@ -24,9 +24,25 @@ public class PlayerActivity extends Activity {
     private long seq;
     private boolean triedAlt;
 
+    /** 正在播的播放器实例：服务器的 /stop 指令要能一把关掉全部（可能叠了几个）。 */
+    private static final java.util.Set<PlayerActivity> LIVE =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<PlayerActivity, Boolean>());
+
+    /** 停止投屏：把当前所有播放器关掉；没在播就是空操作。 */
+    static void finishAll() {
+        for (PlayerActivity a : new java.util.ArrayList<>(LIVE)) {
+            try {
+                a.finish();
+            } catch (Exception ignored) {
+                // 实例已经销毁，忽略
+            }
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        LIVE.add(this);
         getWindow().getDecorView().setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
@@ -166,6 +182,7 @@ public class PlayerActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        LIVE.remove(this);
         if (vv != null) {
             try {
                 vv.stopPlayback();

@@ -11,7 +11,6 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLEncoder;
 
 /**
  * 轮询 OCS 的 /api/cast/current：手机在 OCS 页面点「投屏」后，电视自己拉 /obs/&lt;file&gt; 播放。
@@ -94,7 +93,7 @@ final class CastPoller {
             if (file == null || file.isEmpty()) {
                 return;   // 停止投屏
             }
-            final String url = trimSlash(base) + "/obs/" + encodePath(file);
+            final String url = trimSlash(base) + "/obs/" + TvHttpServer.encodePath(file);
             final String name = file;
             MAIN.post(new Runnable() {
                 @Override
@@ -119,21 +118,5 @@ final class CastPoller {
 
     private static String trimSlash(String s) {
         return s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
-    }
-
-    private static String encodePath(String p) {
-        String[] parts = p.split("/");
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < parts.length; i++) {
-            if (i > 0) {
-                sb.append('/');
-            }
-            try {
-                sb.append(URLEncoder.encode(parts[i], "UTF-8").replace("+", "%20"));
-            } catch (Exception e) {
-                sb.append(parts[i]);
-            }
-        }
-        return sb.toString();
     }
 }

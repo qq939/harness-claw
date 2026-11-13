@@ -65,6 +65,10 @@ public class TvActivity extends Activity {
         installWebView(loadedBase);
         // 手机在 OCS 里点「投屏」后，电视自己拉流播放（轮询 /api/cast/current）
         CastPoller.start(this, loadedBase);
+        // 同时把自己的局域网地址报到服务器：之后任意一台 OCS 都能直接把指令推过来，
+        // 不用再管电视里存的是哪个域名（轮询通道只能指挥「正连着自己的那一台」）。
+        TvHttpServer.start(this);
+        Announcer.start(this, loadedBase);
     }
 
     @Override
@@ -77,6 +81,7 @@ public class TvActivity extends Activity {
             loadedBase = now;
             web.loadUrl(now);
         }
+        Announcer.setBase(now);
     }
 
     private void hideSystemUi() {
@@ -311,6 +316,8 @@ public class TvActivity extends Activity {
     @Override
     protected void onDestroy() {
         CastPoller.stop();
+        Announcer.stop();
+        TvHttpServer.stop();
         if (web != null) {
             root.removeView(web);
             web.destroy();
