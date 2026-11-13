@@ -21,7 +21,7 @@ public class ServerDialogActivity extends Activity {
 
     static final String PREFS = "ocs_tv";
     static final String KEY_URL = "base_url";
-    static final String DEFAULT_URL = "http://oas.dimond.top";
+    static final String DEFAULT_URL = "https://ocs.dimond.top";
 
     private static final String[] SERVERS = {
             "http://oas.dimond.top",
