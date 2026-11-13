@@ -79,6 +79,19 @@ bc7cbd3 fix(video): AirPlay 改走原生控制条
 - 用户原话：「永远记住：你要用ocs来测试，而不是201」。
 - 部署仍然三处都同步（19082 / 201 / 202），但**验证和调试只看 ocs.dimond.top**。
 
+## ocs 家族（用户 2026-11-13 明确）
+
+要一起维护、一起升级的四个实例：
+
+| 名字 | 入口 | 跑在哪 |
+|---|---|---|
+| ocs | `https://ocs.dimond.top` | 本机 19082 卡片 |
+| oas | `https://oas.dimond.top` | NAS2 = 192.168.0.202 |
+| ods | `http://dimond.top:19086` | 本机 19086-obsvideo 卡片（代码在 `obs_ref/src/obs/`，CWD=project，URL_HEAD 就是上面这个） |
+| （没别名） | `http://192.168.0.201` | NAS1 |
+
+**obs 不是家族成员**：老机器，不更新、不用管。改动只同步这四台。
+
 ## 域名 / 设备对照（实测确定，2026-11-13）
 
 - `ocs.dimond.top` = 本机 19082 卡片；`192.168.0.201` = NAS1 的 ocs 容器；
@@ -101,3 +114,17 @@ bc7cbd3 fix(video): AirPlay 改走原生控制条
   从 `192.168.0.202` 推同一台（它轮询的是 ocs）→ `acked=2`，说明确实不依赖轮询。
 - 极米（192.168.0.116）还装着 1.3，需要装一次 `ocstv.apk` 才有接收端；装完就不用再改它的服务器地址。
 - 模拟器/手机通过 ADB 安装时，MIUI 会弹「USB 安装提示」，必须 `input tap` 点「继续安装」，7 秒不点自动拒绝。
+
+## 投屏现状（2026-11-13 收尾，v1.8）
+
+- 四台都是同一套代码 + `ocstv.apk 1.8`；极米已升到 1.8，四台的 `/api/tv/presence` 都是
+  `192.168.0.116:18099 source=probe`。
+- 电视地址存成**列表**（`logs/tv_address.json` 的 `hosts[]`）：只存一台的话，测试用的手机一上报就把投影仪顶掉。
+- **`/obs/` 必须支持 Range（206）**：uvicorn 直连的部署（201、ods）以前对 `Range:` 回 200 整文件，
+  Android MediaPlayer 会一直卡在 0:00 不出画面（nginx 前面的 ocs/oas 没暴露这个问题）。
+  已在 server.py 里手写 `_parse_byte_range` + 206 StreamingResponse。
+- 播放器还有个坑：`normalize()` 曾把非 IP 的 http 一律升级成 https，`http://dimond.top:19086`
+  就永远连不上（不报错、不超时）。1.8 起显式非 80 端口保持 http，并加了 12 秒换协议兜底。
+- 同步：网页投屏中每 0.5 秒 `POST /api/cast/ctl {pos,paused,rate}` → 服务端转 `http://<tv>:18099/ctl`；
+  极米实测 seek 30 → 29.35、2x → 5 秒走 9.8 秒。
+- 调试端点：`GET http://<tv>:18099/state`（pos/paused/rate/name）、`/ping`（含 ver）。
