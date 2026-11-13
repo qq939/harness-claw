@@ -33,7 +33,7 @@ import java.util.Map;
 final class TvHttpServer {
 
     static final int PORT = 18099;
-    private static final String VER = "1.6";
+    private static final String VER = "1.7";
     private static final String TAG = "ocs-tv";
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
@@ -168,6 +168,20 @@ final class TvHttpServer {
                 respond(sock, 200, "{\"ok\":true,\"seq\":" + seq + "}");
                 return;
             }
+            if ("/state".equals(path)) {
+                // 调试用：当前播到哪、是否暂停、倍速多少（同步有没有生效一眼可见）
+                respond(sock, 200, PlayerActivity.stateJson());
+                return;
+            }
+            if ("/ctl".equals(path)) {
+                // 手机是遥控器：进度、播放/暂停、倍速都跟着手机走
+                double pos = parseDouble(params.get("pos"), -1);
+                boolean paused = "1".equals(params.get("paused")) || "true".equals(params.get("paused"));
+                float rate = (float) parseDouble(params.get("rate"), 0);
+                PlayerActivity.remote(pos, paused, rate);
+                respond(sock, 200, "{\"ok\":true}");
+                return;
+            }
             if ("/stop".equals(path)) {
                 MAIN.post(new Runnable() {
                     @Override
@@ -277,6 +291,17 @@ final class TvHttpServer {
             return Long.parseLong(s.trim());
         } catch (Exception e) {
             return 0;
+        }
+    }
+
+    private static double parseDouble(String s, double dflt) {
+        if (s == null) {
+            return dflt;
+        }
+        try {
+            return Double.parseDouble(s.trim());
+        } catch (Exception e) {
+            return dflt;
         }
     }
 
