@@ -63,6 +63,8 @@ public class TvActivity extends Activity {
 
         loadedBase = baseUrl();
         installWebView(loadedBase);
+        // 手机在 OCS 里点「投屏」后，电视自己拉流播放（轮询 /api/cast/current）
+        CastPoller.start(this, loadedBase);
     }
 
     @Override
@@ -308,6 +310,7 @@ public class TvActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        CastPoller.stop();
         if (web != null) {
             root.removeView(web);
             web.destroy();
