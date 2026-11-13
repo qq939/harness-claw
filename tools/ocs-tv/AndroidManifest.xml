@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.harness.ocs.tv"
-    android:versionCode="8"
-    android:versionName="1.7">
+    android:versionCode="9"
+    android:versionName="1.8">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 电视上直接点「TV版」升级：Android 8+ 需要声明，运行时还要用户允许一次 -->

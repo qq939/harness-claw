@@ -33,7 +33,7 @@ import java.util.Map;
 final class TvHttpServer {
 
     static final int PORT = 18099;
-    private static final String VER = "1.7";
+    private static final String VER = "1.8";
     private static final String TAG = "ocs-tv";
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());

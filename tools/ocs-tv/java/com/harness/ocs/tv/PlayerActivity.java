@@ -24,6 +24,8 @@ public class PlayerActivity extends Activity {
     private String base;
     private long seq;
     private boolean triedAlt;
+    /** 是否已经拿到第一帧（用于「12 秒还没播就换协议」的兜底）。 */
+    private boolean prepared;
     /** 已经在电视上生效的倍速（VideoView 没有 getter，自己记）。 */
     private float appliedRate = 1f;
 
@@ -153,6 +155,7 @@ public class PlayerActivity extends Activity {
         vv.setMediaController(mc);
 
         vv.setOnPreparedListener((MediaPlayer mp) -> {
+            prepared = true;
             mp.setLooping(false);
             vv.start();
             toast("正在播放：" + (name == null ? "" : name));
@@ -178,6 +181,20 @@ public class PlayerActivity extends Activity {
         vv.setOnCompletionListener(mp -> toast("播放结束"));
         vv.setVideoURI(Uri.parse(curUrl));
         vv.requestFocus();
+        // 卡死兜底：https 打到只讲 http 的端口时不会报错，只会一直连不上。
+        // 12 秒还没拿到第一帧就换一次协议，别让电视停在黑屏 0:00。
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            if (prepared || triedAlt) {
+                return;
+            }
+            String alt = switchScheme(curUrl);
+            if (!alt.equals(curUrl)) {
+                triedAlt = true;
+                toast("还没播起来，换个协议重试…");
+                curUrl = alt;
+                vv.setVideoURI(Uri.parse(alt));
+            }
+        }, 12000);
     }
 
     /** 通知 OCS「投屏指令已经真的播起来了」，网页看到回执才显示「已投屏」。 */
@@ -211,12 +228,15 @@ public class PlayerActivity extends Activity {
         }).start();
     }
 
-    /** 非 IP/localhost 的 http 地址直接升级成 https（这些站点都会 301 到 https） */
+    /** 非 IP/localhost 的 http 地址升级成 https（这些站点都会 301 到 https）；
+     *  但显式写了非 80 端口的（比如 dimond.top:19086）说明它是直接讲 http 的，别乱升级。 */
     private String normalize(String u) {
         try {
             java.net.URL p = new java.net.URL(u);
             String host = p.getHost();
-            if ("http".equals(p.getProtocol()) && host != null
+            int port = p.getPort();
+            boolean nonStandardPort = port != -1 && port != 80;
+            if ("http".equals(p.getProtocol()) && host != null && !nonStandardPort
                     && !host.matches("\\d{1,3}(\\.\\d{1,3}){3}") && !"localhost".equals(host)) {
                 return "https://" + u.substring("http://".length());
             }
