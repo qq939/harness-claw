@@ -98,6 +98,8 @@ final class CastPoller {
             MAIN.post(new Runnable() {
                 @Override
                 public void run() {
+                    // 轮询通道和推送通道可能同时到；先关掉上一集，避免播放器叠在一起
+                    PlayerActivity.finishAll();
                     Intent i = new Intent(app, PlayerActivity.class);
                     i.putExtra("url", url);
                     i.putExtra("name", name);

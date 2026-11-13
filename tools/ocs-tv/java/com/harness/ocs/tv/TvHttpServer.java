@@ -197,6 +197,9 @@ final class TvHttpServer {
             @Override
             public void run() {
                 try {
+                    // 先关掉上一集：投屏是「跟着手机换台」，叠着开会在屏幕上留下两个播放器，
+                    // 后起的那个拿不到焦点、不会走 onPrepared，回执就永远等不到。
+                    PlayerActivity.finishAll();
                     Intent i = new Intent(appCtx, PlayerActivity.class);
                     i.putExtra("url", trimSlash(playBase) + "/obs/" + encodePath(file));
                     i.putExtra("name", file);
