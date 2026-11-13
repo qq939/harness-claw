@@ -5,10 +5,33 @@ set -e
 mkdir -p /var/run/sshd /root/.ssh /data/hostkeys
 
 # 数据卷上的目录可能是 UGOS 用户（jiang / 1370450000）建的，sshd 的 StrictModes 会拒绝
-# 非 root 属主，导致 "Authentication refused: bad ownership or modes"。这里统一纠正。
-chown root:root /root/.ssh 2>/dev/null || true
-chmod 700 /root/.ssh 2>/dev/null || true
+# 非 root 属主，导致 "Authentication refused: bad ownership or modes" —— 注意这是**静默拒绝**，
+# 客户端只看到 Permission denied，服务端不报错。而且运行期属主还可能被 UGOS 侧改回去，
+# 所以既要启动时修，也要后台巡检。以前这里写的是 `|| true`，chown 失败被吞掉，等于没有兜底。
+fix_ssh_perms() {
+    if [ -d /root/.ssh ]; then
+        _u=$(stat -c %u /root/.ssh 2>/dev/null || echo 0)
+        if [ "$_u" != "0" ]; then
+            echo "[entry][perm] /root/.ssh 属主是 $_u，改回 root"
+            chown root:root /root/.ssh || echo "[entry][perm] chown /root/.ssh 失败（StrictModes 会拒绝登录）"
+        fi
+        chmod 700 /root/.ssh 2>/dev/null || true
+    fi
+    if [ -f /root/.ssh/authorized_keys ]; then
+        _u=$(stat -c %u /root/.ssh/authorized_keys 2>/dev/null || echo 0)
+        if [ "$_u" != "0" ]; then
+            echo "[entry][perm] authorized_keys 属主是 $_u，改回 root"
+            chown root:root /root/.ssh/authorized_keys || echo "[entry][perm] chown authorized_keys 失败（StrictModes 会拒绝登录）"
+        fi
+        chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
+    fi
+}
+
+fix_ssh_perms
 chown -R root:root /data/hostkeys 2>/dev/null || true
+
+# 运行期巡检：属主被改回去时 60 秒内自愈（只在需要修的时候打日志，不刷屏）
+( while :; do sleep 60; fix_ssh_perms; done ) &
 
 # 宿主根目录的 /obs 软链接自愈：UGOS 升级/重置根分区后可能丢失，容器每次启动都补一次。
 # 多块存储卷时按「obs 里文件最多」挑，避免指到新插的空盘上。
@@ -51,10 +74,8 @@ else
     echo "[entry] 未设置 root 密码：只接受 /root/.ssh/authorized_keys 登录"
 fi
 
-if [ -f /root/.ssh/authorized_keys ]; then
-    chown root:root /root/.ssh/authorized_keys 2>/dev/null || true
-    chmod 600 /root/.ssh/authorized_keys
-fi
+# 启动时再修一次（上面的函数已覆盖，这里保留是为了密码设置等步骤之后状态可能变化）
+fix_ssh_perms
 
 echo "[entry] 启动 sshd (22)"
 exec /usr/sbin/sshd -D -e
