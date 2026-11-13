@@ -20,6 +20,8 @@ public class PlayerActivity extends Activity {
     private String name;
     private String origUrl;
     private String curUrl;
+    private String base;
+    private long seq;
     private boolean triedAlt;
 
     @Override
@@ -31,6 +33,8 @@ public class PlayerActivity extends Activity {
 
         String url = getIntent().getStringExtra("url");
         name = getIntent().getStringExtra("name");
+        base = getIntent().getStringExtra("base");
+        seq = getIntent().getLongExtra("seq", 0);
         if (url == null) {
             finish();
             return;
@@ -49,6 +53,8 @@ public class PlayerActivity extends Activity {
             mp.setLooping(false);
             vv.start();
             toast("正在播放：" + (name == null ? "" : name));
+            // 真正拿到第一帧才开始回执：网页据此显示「已投屏」，播不起来的不会误报成功
+            ackCast(base, seq);
         });
         vv.setOnErrorListener((mp, what, extra) -> {
             // 域名站点常把 http 301 到 https；MediaPlayer 不一定跟随，这里换一次协议再试
@@ -69,6 +75,37 @@ public class PlayerActivity extends Activity {
         vv.setOnCompletionListener(mp -> toast("播放结束"));
         vv.setVideoURI(Uri.parse(curUrl));
         vv.requestFocus();
+    }
+
+    /** 通知 OCS「投屏指令已经真的播起来了」，网页看到回执才显示「已投屏」。 */
+    private void ackCast(final String baseUrl, final long castSeq) {
+        if (baseUrl == null || baseUrl.isEmpty() || castSeq <= 0) {
+            return;
+        }
+        final String endpoint = baseUrl + "/api/cast/ack";
+        final String body = "{\"seq\":" + castSeq + "}";
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                java.net.HttpURLConnection conn = null;
+                try {
+                    conn = (java.net.HttpURLConnection) new java.net.URL(endpoint).openConnection();
+                    conn.setRequestMethod("POST");
+                    conn.setConnectTimeout(3000);
+                    conn.setReadTimeout(3000);
+                    conn.setDoOutput(true);
+                    conn.setRequestProperty("Content-Type", "application/json");
+                    conn.getOutputStream().write(body.getBytes("UTF-8"));
+                    conn.getResponseCode();
+                } catch (Exception ignored) {
+                    // 回执失败不影响播放
+                } finally {
+                    if (conn != null) {
+                        conn.disconnect();
+                    }
+                }
+            }
+        }).start();
     }
 
     /** 非 IP/localhost 的 http 地址直接升级成 https（这些站点都会 301 到 https） */

@@ -102,6 +102,8 @@ final class CastPoller {
                     Intent i = new Intent(app, PlayerActivity.class);
                     i.putExtra("url", url);
                     i.putExtra("name", name);
+                    i.putExtra("base", base);
+                    i.putExtra("seq", seq);
                     i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     app.startActivity(i);
                 }
